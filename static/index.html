@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MuseTalk</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f0f0f;color:#e8e8e8;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column}
+
+/* ── Nav ── */
+nav{background:#141414;border-bottom:1px solid #222;display:flex;align-items:center;gap:4px;padding:12px 20px}
+nav h1{font-size:1rem;font-weight:700;color:#fff;margin-right:20px}
+nav h1 span{color:#7c6af7}
+.nav-btn{background:none;border:none;color:#666;font-size:0.82rem;font-weight:600;padding:6px 14px;border-radius:6px;cursor:pointer;transition:color .15s,background .15s}
+.nav-btn:hover{color:#ccc;background:#1e1e1e}
+.nav-btn.active{color:#fff;background:#252525}
+
+/* ── Views ── */
+.view{display:none;padding:28px 24px;max-width:900px;width:100%;margin:0 auto}
+.view.active{display:block}
+
+/* ── Avatar grid ── */
+.grid-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.grid-header h2{font-size:0.9rem;font-weight:600;color:#aaa}
+.avatar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px}
+.avatar-card{background:#1a1a1a;border:2px solid #252525;border-radius:10px;overflow:hidden;cursor:pointer;transition:border-color .15s,transform .1s;position:relative}
+.avatar-card:hover{border-color:#444;transform:translateY(-1px)}
+.avatar-card.selected{border-color:#7c6af7}
+.avatar-card .thumb{width:100%;aspect-ratio:1;background:#111;object-fit:cover;display:block}
+.avatar-card .thumb-placeholder{width:100%;aspect-ratio:1;background:#111;display:flex;align-items:center;justify-content:center;color:#333;font-size:2rem}
+.avatar-card .card-info{padding:8px 10px}
+.avatar-card .card-name{font-size:0.82rem;font-weight:600;color:#e0e0e0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.avatar-card .card-date{font-size:0.68rem;color:#555;margin-top:2px}
+.avatar-card .del-btn{position:absolute;top:5px;right:5px;background:#1a1a1aaa;border:none;color:#666;border-radius:50%;width:22px;height:22px;font-size:0.7rem;cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .15s,color .15s}
+.avatar-card:hover .del-btn{opacity:1}
+.avatar-card .del-btn:hover{color:#e05c5c;background:#2a1a1a}
+.add-card{background:#141414;border:2px dashed #2a2a2a;border-radius:10px;aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;cursor:pointer;transition:border-color .15s,background .15s;color:#444;font-size:0.78rem}
+.add-card:hover{border-color:#7c6af7;background:#1a1830;color:#7c6af7}
+.add-card .add-icon{font-size:1.6rem;line-height:1}
+
+/* ── Buttons ── */
+button.action{background:#7c6af7;border:none;border-radius:8px;color:#fff;padding:9px 20px;font-size:0.85rem;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s;white-space:nowrap}
+button.action:hover{background:#6a58e8}
+button.action:disabled{opacity:.35;cursor:not-allowed}
+button.action.secondary{background:#252525;color:#ccc}
+button.action.secondary:hover{background:#2e2e2e}
+button.action.danger{background:#8b2020}
+button.action.danger:hover{background:#a32626}
+
+/* ── Stream view ── */
+.section{margin-bottom:26px}
+.section-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:.1em;color:#555;font-weight:600;margin-bottom:12px}
+.row{display:flex;gap:10px;align-items:center}
+.file-btn{flex:1;background:#1e1e1e;border:1px solid #2a2a2a;border-radius:8px;color:#aaa;padding:9px 14px;font-size:0.85rem;cursor:pointer;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:border-color .15s}
+.file-btn:hover{border-color:#7c6af7}
+input[type=file]{display:none}
+.status{font-size:0.78rem;color:#666;min-height:1.2em;margin-top:6px}
+.status.ok{color:#4caf7d}
+.status.err{color:#e05c5c}
+.status.info{color:#7c6af7}
+
+/* ── Player ── */
+.player{background:#0a0a0a;border-radius:12px;overflow:hidden;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;position:relative;margin-top:6px}
+canvas{display:none;position:absolute;top:0;left:0;width:100%;height:100%}
+canvas.active{display:block}
+.player-placeholder{color:#2a2a2a;font-size:0.85rem;text-align:center}
+.progress-wrap{height:3px;background:#1a1a1a;border-radius:2px;overflow:hidden;margin-top:8px}
+.progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#7c6af7,#a78bfa);border-radius:2px;transition:width .3s linear}
+
+/* ── Modal ── */
+.modal-overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:100;display:none}
+.modal-overlay.open{display:flex}
+.modal{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:14px;padding:28px;width:100%;max-width:400px;display:flex;flex-direction:column;gap:16px}
+.modal h2{font-size:1rem;font-weight:700;color:#fff}
+.modal-close{float:right;background:none;border:none;color:#666;font-size:1.1rem;cursor:pointer;float:right;margin-left:auto}
+.modal-close:hover{color:#ccc}
+input.text-input{width:100%;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#e0e0e0;padding:9px 13px;font-size:0.88rem;outline:none;transition:border-color .15s}
+input.text-input:focus{border-color:#7c6af7}
+.modal-row{display:flex;gap:10px}
+.modal .status{margin:0}
+
+/* ── Empty state ── */
+.empty{color:#333;text-align:center;padding:40px 0;font-size:0.85rem;line-height:2}
+
+hr{border:none;border-top:1px solid #1e1e1e;margin:4px 0}
+</style>
+</head>
+<body>
+
+<nav>
+  <h1>Muse<span>Talk</span></h1>
+  <button class="nav-btn active" data-view="avatars">Avatars</button>
+  <button class="nav-btn" data-view="stream">Stream</button>
+</nav>
+
+<!-- ── Avatars view ───────────────────────────────────────────────────────── -->
+<div id="view-avatars" class="view active">
+  <div class="grid-header">
+    <h2>Saved Avatars</h2>
+  </div>
+  <div class="avatar-grid" id="avatarGrid">
+    <div class="add-card" id="openModalBtn">
+      <div class="add-icon">+</div>
+      <span>New Avatar</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Stream view ────────────────────────────────────────────────────────── -->
+<div id="view-stream" class="view">
+
+  <div class="section">
+    <div class="section-label">Select Avatar</div>
+    <div class="avatar-grid" id="streamAvatarGrid">
+      <div class="empty" style="grid-column:1/-1;padding:16px 0">No avatars yet — create one in the Avatars tab.</div>
+    </div>
+    <div class="status" id="avatarStatus"></div>
+  </div>
+
+  <hr/>
+
+  <div class="section" style="margin-top:20px">
+    <div class="section-label">Audio</div>
+    <div class="row">
+      <label class="file-btn" id="audioLabel" for="audioInput">Choose audio file…</label>
+      <input type="file" id="audioInput" accept="audio/*"/>
+      <button class="action" id="startBtn" disabled>&#9654; Stream</button>
+    </div>
+    <div class="status" id="streamStatus"></div>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap" style="display:none">
+    <div class="progress-fill" id="progressFill"></div>
+  </div>
+
+  <div class="player" id="player">
+    <div class="player-placeholder" id="playerPlaceholder">Select an avatar and audio to begin</div>
+    <canvas id="canvas"></canvas>
+  </div>
+</div>
+
+<!-- ── New Avatar Modal ───────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <div style="display:flex;align-items:center">
+      <h2>New Avatar</h2>
+      <button class="modal-close" id="modalClose">&#x2715;</button>
+    </div>
+    <input class="text-input" id="avatarNameInput" type="text" placeholder="Avatar name" maxlength="40"/>
+    <div>
+      <label class="file-btn" id="videoLabel" for="videoInput">Choose reference video…</label>
+      <input type="file" id="videoInput" accept="video/*"/>
+    </div>
+    <div class="progress-wrap" id="prepProgressWrap" style="display:none">
+      <div class="progress-fill" id="prepProgressFill"></div>
+    </div>
+    <div class="status" id="modalStatus"></div>
+    <div class="modal-row" style="justify-content:flex-end">
+      <button class="action secondary" id="modalCancelBtn">Cancel</button>
+      <button class="action" id="createBtn" disabled>Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let ws = null;
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen    = () => { console.log('WS open'); loadAvatars(); };
+  ws.onerror   = e  => console.error('WS error', e);
+  ws.onclose   = ()  => { ws = null; setTimeout(connectWS, 2000); };
+  ws.onmessage = onMessage;
+}
+
+function wsReady() {
+  return new Promise(res => {
+    if (ws && ws.readyState === WebSocket.OPEN) return res();
+    const t = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) { clearInterval(t); res(); }
+    }, 50);
+  });
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('view-' + btn.dataset.view).classList.add('active');
+    if (btn.dataset.view === 'stream') renderStreamAvatarGrid();
+  });
+});
+
+// ── Avatar list ───────────────────────────────────────────────────────────────
+let avatarList = [];  // [{id, name, created_at, thumbnail_path}]
+
+async function loadAvatars() {
+  try {
+    const r = await fetch('/avatars');
+    avatarList = await r.json();
+    renderAvatarGrid();
+    renderStreamAvatarGrid();
+  } catch(e) { console.warn('loadAvatars', e); }
+}
+
+function fmtDate(iso) {
+  return iso ? iso.slice(0,10) : '';
+}
+
+function makeCard(av, selectable=false) {
+  const card = document.createElement('div');
+  card.className = 'avatar-card';
+  card.dataset.id = av.id;
+
+  const thumb = document.createElement(av.thumbnail_path ? 'img' : 'div');
+  if (av.thumbnail_path) {
+    thumb.className = 'thumb';
+    thumb.src = `/avatars/${av.id}/thumbnail`;
+    thumb.alt = av.name;
+  } else {
+    thumb.className = 'thumb-placeholder';
+    thumb.textContent = '👤';
+  }
+  card.appendChild(thumb);
+
+  const info = document.createElement('div');
+  info.className = 'card-info';
+  info.innerHTML = `<div class="card-name" title="${av.name}">${av.name}</div>`
+                 + `<div class="card-date">${fmtDate(av.created_at)}</div>`;
+  card.appendChild(info);
+
+  if (!selectable) {
+    const del = document.createElement('button');
+    del.className = 'del-btn';
+    del.title = 'Delete avatar';
+    del.innerHTML = '&#x2715;';
+    del.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm(`Delete avatar "${av.name}"?`)) return;
+      await fetch(`/avatars/${av.id}`, { method: 'DELETE' });
+      avatarList = avatarList.filter(a => a.id !== av.id);
+      renderAvatarGrid();
+      renderStreamAvatarGrid();
+      if (selectedAvatarId === av.id) {
+        selectedAvatarId = null;
+        updateStartBtn();
+      }
+    });
+    card.appendChild(del);
+  }
+
+  return card;
+}
+
+function renderAvatarGrid() {
+  const grid = document.getElementById('avatarGrid');
+  grid.innerHTML = '';
+
+  // Add card first
+  const addCard = document.createElement('div');
+  addCard.className = 'add-card';
+  addCard.id = 'openModalBtn';
+  addCard.innerHTML = '<div class="add-icon">+</div><span>New Avatar</span>';
+  addCard.addEventListener('click', openModal);
+  grid.appendChild(addCard);
+
+  if (avatarList.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.style.gridColumn = '1 / -1';
+    empty.textContent = 'No avatars yet.';
+    grid.appendChild(empty);
+    return;
+  }
+
+  for (const av of avatarList) {
+    grid.appendChild(makeCard(av, false));
+  }
+}
+
+// ── Stream avatar selector ─────────────────────────────────────────────────────
+let selectedAvatarId = null;
+
+function renderStreamAvatarGrid() {
+  const grid = document.getElementById('streamAvatarGrid');
+  grid.innerHTML = '';
+
+  if (avatarList.length === 0) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1;padding:16px 0">No avatars yet — create one in the Avatars tab.</div>';
+    return;
+  }
+
+  for (const av of avatarList) {
+    const card = makeCard(av, true);
+    if (av.id === selectedAvatarId) card.classList.add('selected');
+    card.addEventListener('click', () => {
+      selectedAvatarId = av.id;
+      grid.querySelectorAll('.avatar-card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      document.getElementById('avatarStatus').textContent = `Selected: ${av.name}`;
+      document.getElementById('avatarStatus').className = 'status ok';
+      updateStartBtn();
+    });
+    grid.appendChild(card);
+  }
+}
+
+function updateStartBtn() {
+  const hasAudio  = !!document.getElementById('audioInput').files[0];
+  document.getElementById('startBtn').disabled = !(selectedAvatarId && hasAudio);
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal() {
+  document.getElementById('avatarNameInput').value = '';
+  document.getElementById('videoLabel').textContent = 'Choose reference video…';
+  document.getElementById('videoInput').value = '';
+  document.getElementById('modalStatus').textContent = '';
+  document.getElementById('modalStatus').className = 'status';
+  document.getElementById('prepProgressWrap').style.display = 'none';
+  document.getElementById('prepProgressFill').style.width = '0%';
+  document.getElementById('createBtn').disabled = true;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('open');
+}
+document.getElementById('modalClose').addEventListener('click', closeModal);
+document.getElementById('modalCancelBtn').addEventListener('click', closeModal);
+document.getElementById('modalOverlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('modalOverlay')) closeModal();
+});
+
+document.getElementById('avatarNameInput').addEventListener('input', checkCreateReady);
+document.getElementById('videoInput').addEventListener('change', () => {
+  const f = document.getElementById('videoInput').files[0];
+  if (f) document.getElementById('videoLabel').textContent = f.name;
+  checkCreateReady();
+});
+function checkCreateReady() {
+  const name = document.getElementById('avatarNameInput').value.trim();
+  const file = document.getElementById('videoInput').files[0];
+  document.getElementById('createBtn').disabled = !(name && file);
+}
+
+// ── WS state for modal ─────────────────────────────────────────────────────────
+let wsState = 'idle';  // idle | preparing | streaming
+let prepTicker = null;
+
+function animatePrepBar(fillId) {
+  if (prepTicker) return;
+  let pct = 2;
+  prepTicker = setInterval(() => {
+    pct = Math.min(pct + 0.4, 92);
+    document.getElementById(fillId).style.width = pct + '%';
+  }, 600);
+}
+function stopPrepAnim() {
+  clearInterval(prepTicker);
+  prepTicker = null;
+}
+
+// Create avatar
+document.getElementById('createBtn').addEventListener('click', async () => {
+  const name = document.getElementById('avatarNameInput').value.trim();
+  const file = document.getElementById('videoInput').files[0];
+  if (!name || !file) return;
+
+  await wsReady();
+
+  document.getElementById('createBtn').disabled = true;
+  document.getElementById('modalCancelBtn').disabled = true;
+  document.getElementById('prepProgressWrap').style.display = 'block';
+  document.getElementById('prepProgressFill').style.width = '2%';
+  document.getElementById('modalStatus').textContent = 'Uploading video…';
+  document.getElementById('modalStatus').className = 'status info';
+  wsState = 'preparing';
+  animatePrepBar('prepProgressFill');
+
+  ws.send(JSON.stringify({ type: 'prepare', name, bbox_shift: 0 }));
+  ws.send(await file.arrayBuffer());
+});
+
+// ── WS message handler ────────────────────────────────────────────────────────
+function onMessage(ev) {
+  if (ev.data instanceof ArrayBuffer) {
+    handleBinaryFrame(ev.data);
+    return;
+  }
+  const msg = JSON.parse(ev.data);
+
+  switch (msg.type) {
+
+    case 'preparing':
+      animatePrepBar('prepProgressFill');
+      document.getElementById('modalStatus').textContent = 'Preparing avatar… (this takes a minute)';
+      break;
+
+    case 'ready': {
+      wsState = 'idle';
+      stopPrepAnim();
+      document.getElementById('prepProgressFill').style.width = '100%';
+      document.getElementById('modalStatus').textContent = '✓ Avatar created!';
+      document.getElementById('modalStatus').className = 'status ok';
+      document.getElementById('modalCancelBtn').disabled = false;
+      avatarList.unshift(msg.avatar);
+      renderAvatarGrid();
+      renderStreamAvatarGrid();
+      setTimeout(closeModal, 1200);
+      break;
+    }
+
+    case 'buffering':
+      setStreamStatus('Processing audio…', 'info');
+      break;
+
+    case 'stream_meta':
+      sampleRate   = msg.sample_rate;
+      fps          = msg.fps;
+      totalFrames  = msg.total_frames;
+      audioCtx     = new AudioContext({ sampleRate });
+      frameBuffer  = {};
+      nextFrameIdx = 0;
+      playStart    = 0;
+      playbackStarted = false;
+      pendingFrames   = [];
+      canvasSized  = false;
+      // Size canvas to player container now (CSS will handle display scaling)
+      { const pl = document.getElementById('player');
+        canvas.width  = pl.clientWidth  || 854;
+        canvas.height = pl.clientHeight || 480; }
+      document.getElementById('progressWrap').style.display = 'block';
+      document.getElementById('progressFill').style.width   = '0%';
+      setStreamStatus('Buffering…', 'info');
+      break;
+
+    case 'done':
+      setStreamStatus('✓ Done', 'ok');
+      document.getElementById('startBtn').disabled = false;
+      break;
+
+    case 'error':
+      wsState = 'idle';
+      stopPrepAnim();
+      document.getElementById('createBtn').disabled   = false;
+      document.getElementById('modalCancelBtn').disabled = false;
+      document.getElementById('modalStatus').textContent = '✗ ' + (msg.detail || 'Error');
+      document.getElementById('modalStatus').className   = 'status err';
+      setStreamStatus('✗ ' + (msg.detail || 'Error'), 'err');
+      document.getElementById('startBtn').disabled = false;
+      break;
+
+    case 'avatars':
+      avatarList = msg.list;
+      renderAvatarGrid();
+      renderStreamAvatarGrid();
+      break;
+  }
+}
+
+function setStreamStatus(text, cls='') {
+  const el = document.getElementById('streamStatus');
+  el.textContent = text;
+  el.className   = 'status' + (cls ? ' ' + cls : '');
+}
+
+// ── Audio + Video player ───────────────────────────────────────────────────────
+let audioCtx    = null;
+let sampleRate  = 44100;
+let fps         = 25;
+let totalFrames = 0;
+let frameBuffer = {};       // frameIdx → ImageBitmap
+let pendingFrames = [];     // before playback starts
+let playStart   = 0;        // audioCtx.currentTime when frame 0 plays
+let playbackStarted = false;
+let canvasSized = false;
+let rafId       = null;
+const PREBUFFER = 8;        // frames to accumulate before starting
+
+const canvas  = document.getElementById('canvas');
+const ctx2d   = canvas.getContext('2d');
+
+function parseBinaryFrame(buf) {
+  const view    = new DataView(buf);
+  const frameIdx = view.getUint32(0, true);
+  const jpegLen  = view.getUint32(4, true);
+  const pcmCount = view.getUint32(8, true);
+  const jpeg = new Uint8Array(buf, 12, jpegLen);
+  const pcm  = new Float32Array(buf, 12 + jpegLen, pcmCount);
+  return { frameIdx, jpeg, pcm };
+}
+
+function scheduleAudioChunk(pcm, frameIdx) {
+  const abuf = audioCtx.createBuffer(1, pcm.length, sampleRate);
+  abuf.getChannelData(0).set(pcm);
+  const src = audioCtx.createBufferSource();
+  src.buffer = abuf;
+  src.connect(audioCtx.destination);
+  const t = playStart + frameIdx / fps;
+  src.start(Math.max(t, audioCtx.currentTime + 0.001));
+}
+
+function decodeAndStore(jpeg, frameIdx) {
+  createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' })).then(bmp => {
+    frameBuffer[frameIdx] = bmp;
+  });
+}
+
+function drawFrame(bmp) {
+  const cw = canvas.width, ch = canvas.height;
+  const scale = Math.min(cw / bmp.width, ch / bmp.height);
+  const dw = bmp.width * scale,  dh = bmp.height * scale;
+  const dx = (cw - dw) / 2,     dy = (ch - dh) / 2;
+  ctx2d.fillStyle = '#000';
+  ctx2d.fillRect(0, 0, cw, ch);
+  ctx2d.drawImage(bmp, dx, dy, dw, dh);
+}
+
+function beginPlayback() {
+  playbackStarted = true;
+  playStart = audioCtx.currentTime + 0.05;
+
+  for (const f of pendingFrames) {
+    scheduleAudioChunk(f.pcm, f.frameIdx);
+    decodeAndStore(f.jpeg, f.frameIdx);
+  }
+  pendingFrames = [];
+
+  cancelAnimationFrame(rafId);
+  rafId = requestAnimationFrame(renderLoop);
+  setStreamStatus('Playing…', 'ok');
+
+  // Show canvas
+  document.getElementById('playerPlaceholder').style.display = 'none';
+  canvas.classList.add('active');
+}
+
+function handleBinaryFrame(buf) {
+  if (!audioCtx) return;
+  const { frameIdx, jpeg, pcm } = parseBinaryFrame(buf);
+
+  // Progress bar
+  document.getElementById('progressFill').style.width =
+    (((frameIdx + 1) / totalFrames) * 100).toFixed(1) + '%';
+
+  if (!playbackStarted) {
+    pendingFrames.push({ frameIdx, jpeg, pcm });
+    const isLast = (frameIdx === totalFrames - 1);
+    if (pendingFrames.length >= PREBUFFER || isLast) beginPlayback();
+  } else {
+    scheduleAudioChunk(pcm, frameIdx);
+    decodeAndStore(jpeg, frameIdx);
+  }
+}
+
+function renderLoop() {
+  if (!playbackStarted || !playStart) { rafId = requestAnimationFrame(renderLoop); return; }
+  const elapsed = audioCtx.currentTime - playStart;
+  if (elapsed >= 0) {
+    const target = Math.floor(elapsed * fps);
+    if (frameBuffer[target]) {
+      drawFrame(frameBuffer[target]);
+      // Free past frames
+      for (let j = target - 2; j >= 0; j--) {
+        if (!frameBuffer[j]) break;
+        frameBuffer[j].close?.();
+        delete frameBuffer[j];
+      }
+    }
+  }
+  rafId = requestAnimationFrame(renderLoop);
+}
+
+// ── Audio file picker ─────────────────────────────────────────────────────────
+document.getElementById('audioInput').addEventListener('change', () => {
+  const f = document.getElementById('audioInput').files[0];
+  if (f) document.getElementById('audioLabel').textContent = f.name;
+  updateStartBtn();
+});
+
+// ── Start streaming ────────────────────────────────────────────────────────────
+document.getElementById('startBtn').addEventListener('click', async () => {
+  const audioFile = document.getElementById('audioInput').files[0];
+  if (!selectedAvatarId || !audioFile) return;
+
+  await wsReady();
+
+  document.getElementById('startBtn').disabled = true;
+  setStreamStatus('Sending audio…', 'info');
+  wsState = 'streaming';
+
+  ws.send(JSON.stringify({
+    type:      'stream',
+    avatar_id: selectedAvatarId,
+    filename:  audioFile.name,
+  }));
+  ws.send(await audioFile.arrayBuffer());
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+connectWS();
+</script>
+</body>
+</html>

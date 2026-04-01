@@ -15,4 +15,9 @@ ffmprobe*
 ffplay*
 debug
 exp_out
-.gradio
+.gradio# LiveAvatar runtime
+.venv/
+uploads/
+avatars.db
+*.db-shm
+*.db-wal
