@@ -12,6 +12,34 @@ class AudioProcessor:
     def __init__(self, feature_extractor_path="openai/whisper-tiny/"):
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(feature_extractor_path)
 
+    def get_audio_feature_from_array(self, audio_array, weight_dtype=None):
+        """
+        Process a float32 numpy array sampled at 16 kHz through the Whisper
+        feature extractor.  Returns (features_list, sample_length) in the same
+        format as get_audio_feature so it can be passed directly to
+        get_whisper_chunk.
+        """
+        sr = 16000
+        segment_length = 30 * sr
+        if len(audio_array) == 0:
+            audio_array = np.zeros(sr, dtype=np.float32)
+
+        segments = [
+            audio_array[i: i + segment_length]
+            for i in range(0, len(audio_array), segment_length)
+        ]
+
+        features = []
+        for segment in segments:
+            audio_feature = self.feature_extractor(
+                segment, return_tensors="pt", sampling_rate=sr
+            ).input_features
+            if weight_dtype is not None:
+                audio_feature = audio_feature.to(dtype=weight_dtype)
+            features.append(audio_feature)
+
+        return features, len(audio_array)
+
     def get_audio_feature(self, wav_path, start_index=0, weight_dtype=None):
         if not os.path.exists(wav_path):
             return None

@@ -27,9 +27,12 @@ nav h1 span{color:#7c6af7}
 .avatar-card{background:#1a1a1a;border:2px solid #252525;border-radius:10px;overflow:hidden;cursor:pointer;transition:border-color .15s,transform .1s;position:relative}
 .avatar-card:hover{border-color:#444;transform:translateY(-1px)}
 .avatar-card.selected{border-color:#7c6af7}
+.avatar-card.avatar-ready{border-color:#2d5a3d}
+.avatar-card.selected.avatar-ready{border-color:#7c6af7}
 .avatar-card .thumb{width:100%;aspect-ratio:1;background:#111;object-fit:cover;display:block}
+.avatar-card video.thumb{cursor:default}
 .avatar-card .thumb-placeholder{width:100%;aspect-ratio:1;background:#111;display:flex;align-items:center;justify-content:center;color:#333;font-size:2rem}
-.avatar-card .card-info{padding:8px 10px}
+.avatar-card .card-info{padding:8px 10px 4px}
 .avatar-card .card-name{font-size:0.82rem;font-weight:600;color:#e0e0e0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .avatar-card .card-date{font-size:0.68rem;color:#555;margin-top:2px}
 .avatar-card .del-btn{position:absolute;top:5px;right:5px;background:#1a1a1aaa;border:none;color:#666;border-radius:50%;width:22px;height:22px;font-size:0.7rem;cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .15s,color .15s}
@@ -38,6 +41,12 @@ nav h1 span{color:#7c6af7}
 .add-card{background:#141414;border:2px dashed #2a2a2a;border-radius:10px;aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;cursor:pointer;transition:border-color .15s,background .15s;color:#444;font-size:0.78rem}
 .add-card:hover{border-color:#7c6af7;background:#1a1830;color:#7c6af7}
 .add-card .add-icon{font-size:1.6rem;line-height:1}
+
+/* ── Use button (stream view avatar cards) ── */
+.use-btn{display:block;width:calc(100% - 16px);margin:0 8px 8px;padding:4px 0;background:#1e1e1e;border:1px solid #2e2e2e;border-radius:5px;color:#888;font-size:0.72rem;font-weight:600;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s;letter-spacing:.03em}
+.use-btn:hover:not(:disabled){background:#7c6af7;color:#fff;border-color:#7c6af7}
+.use-btn.loading{color:#666;cursor:default}
+.use-btn.loaded{background:#1a3a2a;color:#4caf7d;border-color:#2d5a3d;cursor:default}
 
 /* ── Buttons ── */
 button.action{background:#7c6af7;border:none;border-radius:8px;color:#fff;padding:9px 20px;font-size:0.85rem;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s;white-space:nowrap}
@@ -67,6 +76,9 @@ canvas.active{display:block}
 .player-placeholder{color:#2a2a2a;font-size:0.85rem;text-align:center}
 .progress-wrap{height:3px;background:#1a1a1a;border-radius:2px;overflow:hidden;margin-top:8px}
 .progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#7c6af7,#a78bfa);border-radius:2px;transition:width .3s linear}
+/* Indeterminate animation for streaming mode */
+@keyframes stream-pulse{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
+.progress-fill.streaming{width:25%!important;animation:stream-pulse 1.4s ease-in-out infinite;transition:none}
 
 /* ── Modal ── */
 .modal-overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:100;display:none}
@@ -111,7 +123,7 @@ hr{border:none;border-top:1px solid #1e1e1e;margin:4px 0}
 <div id="view-stream" class="view">
 
   <div class="section">
-    <div class="section-label">Select Avatar</div>
+    <div class="section-label">Select Avatar &amp; Load</div>
     <div class="avatar-grid" id="streamAvatarGrid">
       <div class="empty" style="grid-column:1/-1;padding:16px 0">No avatars yet — create one in the Avatars tab.</div>
     </div>
@@ -126,6 +138,7 @@ hr{border:none;border-top:1px solid #1e1e1e;margin:4px 0}
       <label class="file-btn" id="audioLabel" for="audioInput">Choose audio file…</label>
       <input type="file" id="audioInput" accept="audio/*"/>
       <button class="action" id="startBtn" disabled>&#9654; Stream</button>
+      <button class="action secondary" id="sendBtn" disabled>&#8595; Generate</button>
     </div>
     <div class="status" id="streamStatus"></div>
   </div>
@@ -137,6 +150,16 @@ hr{border:none;border-top:1px solid #1e1e1e;margin:4px 0}
   <div class="player" id="player">
     <div class="player-placeholder" id="playerPlaceholder">Select an avatar and audio to begin</div>
     <canvas id="canvas"></canvas>
+  </div>
+
+  <!-- ── Generated video (batch mode) ──────────────────────────────────────── -->
+  <div id="generatedSection" style="display:none;margin-top:20px">
+    <div class="section-label">Generated Video</div>
+    <video id="generatedVideo" controls style="width:100%;border-radius:12px;background:#0a0a0a;display:block"></video>
+    <div class="row" style="margin-top:8px;gap:8px">
+      <a id="downloadLink" class="action secondary" download="output.mp4"
+         style="text-decoration:none;text-align:center;padding:9px 20px">&#8595; Download MP4</a>
+    </div>
   </div>
 </div>
 
@@ -186,6 +209,10 @@ function wsReady() {
   });
 }
 
+// Attach to the static HTML button immediately so clicks work before WS connects.
+// renderAvatarGrid() will replace it with a new element that also gets this listener.
+document.getElementById('openModalBtn').addEventListener('click', openModal);
+
 // ── Navigation ────────────────────────────────────────────────────────────────
 document.querySelectorAll('.nav-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -199,6 +226,23 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
 
 // ── Avatar list ───────────────────────────────────────────────────────────────
 let avatarList = [];  // [{id, name, created_at, thumbnail_path}]
+const loadedAvatars = new Set();  // avatar IDs that are pre-loaded in cache
+
+// Reset every loaded avatar's button/card back to "Use" state, except the given id.
+function _unloadOtherAvatars(exceptId) {
+  for (const loadedId of [...loadedAvatars]) {
+    if (loadedId === exceptId) continue;
+    loadedAvatars.delete(loadedId);
+    const btn = document.querySelector(`#streamAvatarGrid .use-btn[data-avatar-id="${loadedId}"]`);
+    if (!btn) continue;
+    btn.textContent = 'Use';
+    btn.classList.remove('loaded', 'loading');
+    btn.disabled = false;
+    btn.title = 'Pre-load avatar embeddings into GPU cache';
+    const card = btn.closest('.avatar-card');
+    if (card) card.classList.remove('avatar-ready');
+  }
+}
 
 async function loadAvatars() {
   try {
@@ -218,16 +262,31 @@ function makeCard(av, selectable=false) {
   card.className = 'avatar-card';
   card.dataset.id = av.id;
 
-  const thumb = document.createElement(av.thumbnail_path ? 'img' : 'div');
-  if (av.thumbnail_path) {
-    thumb.className = 'thumb';
-    thumb.src = `/avatars/${av.id}/thumbnail`;
-    thumb.alt = av.name;
+  if (av.video_path) {
+    // Video preview: shows poster thumbnail, plays on hover
+    const vid = document.createElement('video');
+    vid.className = 'thumb';
+    vid.src       = `/avatars/${av.id}/video`;
+    vid.poster    = `/avatars/${av.id}/thumbnail`;
+    vid.muted     = true;
+    vid.loop      = true;
+    vid.playsInline = true;
+    vid.preload   = 'none';
+    card.addEventListener('mouseenter', () => vid.play().catch(() => {}));
+    card.addEventListener('mouseleave', () => { vid.pause(); vid.currentTime = 0; });
+    card.appendChild(vid);
+  } else if (av.thumbnail_path) {
+    const img = document.createElement('img');
+    img.className = 'thumb';
+    img.src = `/avatars/${av.id}/thumbnail`;
+    img.alt = av.name;
+    card.appendChild(img);
   } else {
-    thumb.className = 'thumb-placeholder';
-    thumb.textContent = '👤';
+    const ph = document.createElement('div');
+    ph.className = 'thumb-placeholder';
+    ph.textContent = '👤';
+    card.appendChild(ph);
   }
-  card.appendChild(thumb);
 
   const info = document.createElement('div');
   info.className = 'card-info';
@@ -236,6 +295,7 @@ function makeCard(av, selectable=false) {
   card.appendChild(info);
 
   if (!selectable) {
+    // ── Avatars tab: delete button ─────────────────────────────────────────
     const del = document.createElement('button');
     del.className = 'del-btn';
     del.title = 'Delete avatar';
@@ -245,6 +305,7 @@ function makeCard(av, selectable=false) {
       if (!confirm(`Delete avatar "${av.name}"?`)) return;
       await fetch(`/avatars/${av.id}`, { method: 'DELETE' });
       avatarList = avatarList.filter(a => a.id !== av.id);
+      loadedAvatars.delete(av.id);
       renderAvatarGrid();
       renderStreamAvatarGrid();
       if (selectedAvatarId === av.id) {
@@ -253,6 +314,49 @@ function makeCard(av, selectable=false) {
       }
     });
     card.appendChild(del);
+  } else {
+    // ── Stream tab: Use button to pre-load avatar embeddings ───────────────
+    if (loadedAvatars.has(av.id)) card.classList.add('avatar-ready');
+
+    const useBtn = document.createElement('button');
+    useBtn.className = 'use-btn' + (loadedAvatars.has(av.id) ? ' loaded' : '');
+    useBtn.dataset.avatarId = av.id;
+    useBtn.textContent = loadedAvatars.has(av.id) ? '✓ Loaded' : 'Use';
+    useBtn.title = loadedAvatars.has(av.id)
+      ? 'Avatar embeddings are cached and ready'
+      : 'Pre-load avatar embeddings into GPU cache';
+
+    useBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+
+      // Always select this avatar when Use is clicked
+      selectedAvatarId = av.id;
+      document.querySelectorAll('#streamAvatarGrid .avatar-card')
+              .forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      updateStartBtn();
+
+      if (useBtn.classList.contains('loaded') || useBtn.classList.contains('loading')) {
+        document.getElementById('avatarStatus').textContent =
+          `Selected: ${av.name} (embeddings cached)`;
+        document.getElementById('avatarStatus').className = 'status ok';
+        return;
+      }
+
+      // Immediately reset any other avatar that was previously shown as loaded.
+      _unloadOtherAvatars(av.id);
+
+      useBtn.textContent = 'Loading…';
+      useBtn.classList.add('loading');
+      useBtn.disabled = true;
+      document.getElementById('avatarStatus').textContent = `Loading ${av.name}…`;
+      document.getElementById('avatarStatus').className = 'status info';
+
+      await wsReady();
+      ws.send(JSON.stringify({ type: 'preload_avatar', avatar_id: av.id }));
+    });
+
+    card.appendChild(useBtn);
   }
 
   return card;
@@ -262,7 +366,6 @@ function renderAvatarGrid() {
   const grid = document.getElementById('avatarGrid');
   grid.innerHTML = '';
 
-  // Add card first
   const addCard = document.createElement('div');
   addCard.className = 'add-card';
   addCard.id = 'openModalBtn';
@@ -299,12 +402,15 @@ function renderStreamAvatarGrid() {
   for (const av of avatarList) {
     const card = makeCard(av, true);
     if (av.id === selectedAvatarId) card.classList.add('selected');
+
     card.addEventListener('click', () => {
       selectedAvatarId = av.id;
       grid.querySelectorAll('.avatar-card').forEach(c => c.classList.remove('selected'));
       card.classList.add('selected');
-      document.getElementById('avatarStatus').textContent = `Selected: ${av.name}`;
-      document.getElementById('avatarStatus').className = 'status ok';
+      const loaded = loadedAvatars.has(av.id);
+      document.getElementById('avatarStatus').textContent =
+        `Selected: ${av.name}` + (loaded ? ' (embeddings cached)' : ' — click Use to pre-load embeddings');
+      document.getElementById('avatarStatus').className = loaded ? 'status ok' : 'status';
       updateStartBtn();
     });
     grid.appendChild(card);
@@ -312,8 +418,10 @@ function renderStreamAvatarGrid() {
 }
 
 function updateStartBtn() {
-  const hasAudio  = !!document.getElementById('audioInput').files[0];
-  document.getElementById('startBtn').disabled = !(selectedAvatarId && hasAudio);
+  const hasAudio = !!document.getElementById('audioInput').files[0];
+  const ready    = !!(selectedAvatarId && hasAudio);
+  document.getElementById('startBtn').disabled = !ready;
+  document.getElementById('sendBtn').disabled  = !ready;
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
@@ -416,33 +524,75 @@ function onMessage(ev) {
       break;
     }
 
+    // ── Avatar pre-loaded into GPU cache ──────────────────────────────────
+    case 'avatar_loaded': {
+      const id = msg.avatar_id;
+      _unloadOtherAvatars(id);
+      loadedAvatars.add(id);
+      // Update the Use button on this card
+      const useBtn = document.querySelector(
+        `#streamAvatarGrid .use-btn[data-avatar-id="${id}"]`
+      );
+      if (useBtn) {
+        useBtn.textContent = '✓ Loaded';
+        useBtn.classList.remove('loading');
+        useBtn.classList.add('loaded');
+        useBtn.disabled = false;
+        useBtn.title = 'Avatar embeddings are cached and ready';
+        const card = useBtn.closest('.avatar-card');
+        if (card) card.classList.add('avatar-ready');
+      }
+      if (selectedAvatarId === id) {
+        document.getElementById('avatarStatus').textContent =
+          `Selected: ${(avatarList.find(a=>a.id===id)||{}).name||id} (embeddings cached)`;
+        document.getElementById('avatarStatus').className = 'status ok';
+      }
+      break;
+    }
+
     case 'buffering':
-      setStreamStatus('Processing audio…', 'info');
+      setStreamStatus('Processing…', 'info');
       break;
 
     case 'stream_meta':
-      sampleRate   = msg.sample_rate;
-      fps          = msg.fps;
-      totalFrames  = msg.total_frames;
-      audioCtx     = new AudioContext({ sampleRate });
-      frameBuffer  = {};
-      nextFrameIdx = 0;
-      playStart    = 0;
+      sampleRate      = msg.sample_rate;
+      fps             = msg.fps;
+      totalFrames     = msg.total_frames;   // -1 means streaming / unknown
+      streamingMode   = (totalFrames < 0);
+      audioCtx        = new AudioContext({ sampleRate });
+      frameBuffer     = {};
+      nextFrameIdx    = 0;
+      playStart       = 0;
       playbackStarted = false;
       pendingFrames   = [];
-      canvasSized  = false;
-      // Size canvas to player container now (CSS will handle display scaling)
+      canvasSized     = false;
       { const pl = document.getElementById('player');
         canvas.width  = pl.clientWidth  || 854;
         canvas.height = pl.clientHeight || 480; }
       document.getElementById('progressWrap').style.display = 'block';
-      document.getElementById('progressFill').style.width   = '0%';
+      const fill = document.getElementById('progressFill');
+      fill.style.width = '0%';
+      if (streamingMode) {
+        fill.classList.add('streaming');
+      } else {
+        fill.classList.remove('streaming');
+        fill.style.width = '0%';
+      }
       setStreamStatus('Buffering…', 'info');
       break;
 
     case 'done':
+      // Force-start playback if we never crossed PREBUFFER threshold
+      if (!playbackStarted && pendingFrames.length > 0) {
+        beginPlayback();
+      }
+      if (streamingMode) {
+        document.getElementById('progressFill').classList.remove('streaming');
+        document.getElementById('progressFill').style.width = '100%';
+      }
       setStreamStatus('✓ Done', 'ok');
       document.getElementById('startBtn').disabled = false;
+      wsState = 'idle';
       break;
 
     case 'error':
@@ -454,6 +604,9 @@ function onMessage(ev) {
       document.getElementById('modalStatus').className   = 'status err';
       setStreamStatus('✗ ' + (msg.detail || 'Error'), 'err');
       document.getElementById('startBtn').disabled = false;
+      if (streamingMode) {
+        document.getElementById('progressFill').classList.remove('streaming');
+      }
       break;
 
     case 'avatars':
@@ -471,20 +624,21 @@ function setStreamStatus(text, cls='') {
 }
 
 // ── Audio + Video player ───────────────────────────────────────────────────────
-let audioCtx    = null;
-let sampleRate  = 44100;
-let fps         = 25;
-let totalFrames = 0;
-let frameBuffer = {};       // frameIdx → ImageBitmap
-let pendingFrames = [];     // before playback starts
-let playStart   = 0;        // audioCtx.currentTime when frame 0 plays
+let audioCtx        = null;
+let sampleRate      = 44100;
+let fps             = 25;
+let totalFrames     = 0;
+let streamingMode   = false;    // true when total_frames is unknown (-1)
+let frameBuffer     = {};       // frameIdx → ImageBitmap
+let pendingFrames   = [];       // accumulated before playback starts
+let playStart       = 0;        // audioCtx.currentTime when frame 0 plays
 let playbackStarted = false;
-let canvasSized = false;
-let rafId       = null;
-const PREBUFFER = 8;        // frames to accumulate before starting
+let canvasSized     = false;
+let rafId           = null;
+const PREBUFFER     = 24;       // frames to accumulate before auto-starting (= 1 full second @ 24 fps)
 
-const canvas  = document.getElementById('canvas');
-const ctx2d   = canvas.getContext('2d');
+const canvas = document.getElementById('canvas');
+const ctx2d  = canvas.getContext('2d');
 
 function parseBinaryFrame(buf) {
   const view    = new DataView(buf);
@@ -536,7 +690,6 @@ function beginPlayback() {
   rafId = requestAnimationFrame(renderLoop);
   setStreamStatus('Playing…', 'ok');
 
-  // Show canvas
   document.getElementById('playerPlaceholder').style.display = 'none';
   canvas.classList.add('active');
 }
@@ -545,14 +698,15 @@ function handleBinaryFrame(buf) {
   if (!audioCtx) return;
   const { frameIdx, jpeg, pcm } = parseBinaryFrame(buf);
 
-  // Progress bar
-  document.getElementById('progressFill').style.width =
-    (((frameIdx + 1) / totalFrames) * 100).toFixed(1) + '%';
+  // Progress bar — only for known-length streams
+  if (!streamingMode && totalFrames > 0) {
+    document.getElementById('progressFill').style.width =
+      (((frameIdx + 1) / totalFrames) * 100).toFixed(1) + '%';
+  }
 
   if (!playbackStarted) {
     pendingFrames.push({ frameIdx, jpeg, pcm });
-    const isLast = (frameIdx === totalFrames - 1);
-    if (pendingFrames.length >= PREBUFFER || isLast) beginPlayback();
+    if (pendingFrames.length >= PREBUFFER) beginPlayback();
   } else {
     scheduleAudioChunk(pcm, frameIdx);
     decodeAndStore(jpeg, frameIdx);
@@ -566,7 +720,6 @@ function renderLoop() {
     const target = Math.floor(elapsed * fps);
     if (frameBuffer[target]) {
       drawFrame(frameBuffer[target]);
-      // Free past frames
       for (let j = target - 2; j >= 0; j--) {
         if (!frameBuffer[j]) break;
         frameBuffer[j].close?.();
@@ -584,7 +737,7 @@ document.getElementById('audioInput').addEventListener('change', () => {
   updateStartBtn();
 });
 
-// ── Start streaming ────────────────────────────────────────────────────────────
+// ── Start streaming — decode audio → send in 1-second chunks ─────────────────
 document.getElementById('startBtn').addEventListener('click', async () => {
   const audioFile = document.getElementById('audioInput').files[0];
   if (!selectedAvatarId || !audioFile) return;
@@ -592,15 +745,123 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   await wsReady();
 
   document.getElementById('startBtn').disabled = true;
-  setStreamStatus('Sending audio…', 'info');
+  setStreamStatus('Decoding audio…', 'info');
   wsState = 'streaming';
 
+  // Decode audio file to raw PCM via Web Audio API
+  let audioBuffer;
+  try {
+    const arrayBuf = await audioFile.arrayBuffer();
+    const tmpCtx   = new AudioContext();
+    audioBuffer    = await tmpCtx.decodeAudioData(arrayBuf);
+    await tmpCtx.close();
+  } catch (err) {
+    setStreamStatus('✗ Failed to decode audio: ' + err.message, 'err');
+    document.getElementById('startBtn').disabled = false;
+    wsState = 'idle';
+    return;
+  }
+
+  // Mix down to mono
+  let pcm;
+  if (audioBuffer.numberOfChannels > 1) {
+    pcm = new Float32Array(audioBuffer.length);
+    for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+      const chan = audioBuffer.getChannelData(ch);
+      for (let i = 0; i < pcm.length; i++) pcm[i] += chan[i];
+    }
+    const inv = 1 / audioBuffer.numberOfChannels;
+    for (let i = 0; i < pcm.length; i++) pcm[i] *= inv;
+  } else {
+    pcm = audioBuffer.getChannelData(0).slice();
+  }
+
+  // Resample to fixed 16 kHz (the server pipeline always expects 16 kHz)
+  const TARGET_SR = 16000;
+  let pcm16k = pcm;
+  if (audioBuffer.sampleRate !== TARGET_SR) {
+    setStreamStatus('Resampling to 16 kHz…', 'info');
+    const targetLen = Math.ceil(pcm.length * TARGET_SR / audioBuffer.sampleRate);
+    const offCtx    = new OfflineAudioContext(1, targetLen, TARGET_SR);
+    const srcBuf    = offCtx.createBuffer(1, pcm.length, audioBuffer.sampleRate);
+    srcBuf.getChannelData(0).set(pcm);
+    const srcNode   = offCtx.createBufferSource();
+    srcNode.buffer  = srcBuf;
+    srcNode.connect(offCtx.destination);
+    srcNode.start(0);
+    const rendered  = await offCtx.startRendering();
+    pcm16k = rendered.getChannelData(0).slice();
+  }
+
+  // 1 second of 16 kHz audio per chunk = 16000 samples
+  const CHUNK_SIZE = TARGET_SR;
+
+  // Signal start of streaming session (pipeline is fixed at 16 kHz / 24 fps)
   ws.send(JSON.stringify({
-    type:      'stream',
-    avatar_id: selectedAvatarId,
-    filename:  audioFile.name,
+    type:        'stream_start',
+    avatar_id:   selectedAvatarId,
+    sample_rate: TARGET_SR,
   }));
-  ws.send(await audioFile.arrayBuffer());
+
+  setStreamStatus('Streaming audio…', 'info');
+
+  // Send 16 kHz PCM in 1-second Float32Array chunks
+  for (let offset = 0; offset < pcm16k.length; offset += CHUNK_SIZE) {
+    const chunk = pcm16k.slice(offset, offset + CHUNK_SIZE);
+    ws.send(chunk.buffer);
+    // Yield to the event loop so the receive path (video frames) can run
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  // Signal end of audio stream
+  ws.send(JSON.stringify({ type: 'stream_end' }));
+  setStreamStatus('Waiting for frames…', 'info');
+});
+
+// ── Generate button (full offline inference → MP4 download) ──────────────────
+document.getElementById('sendBtn').addEventListener('click', async () => {
+  const audioFile = document.getElementById('audioInput').files[0];
+  if (!selectedAvatarId || !audioFile) return;
+
+  const sendBtn = document.getElementById('sendBtn');
+  sendBtn.disabled    = true;
+  sendBtn.textContent = 'Generating…';
+  document.getElementById('startBtn').disabled = true;
+  setStreamStatus('Rendering full video — this may take a moment…', 'info');
+
+  // Hide any previous generated video
+  document.getElementById('generatedSection').style.display = 'none';
+  const prevUrl = document.getElementById('generatedVideo').src;
+  if (prevUrl && prevUrl.startsWith('blob:')) URL.revokeObjectURL(prevUrl);
+
+  try {
+    const form = new FormData();
+    form.append('avatar_id', selectedAvatarId);
+    form.append('audio', audioFile);
+
+    const resp = await fetch('/generate', { method: 'POST', body: form });
+
+    if (!resp.ok) {
+      let detail = 'Server error';
+      try { detail = (await resp.json()).error || detail; } catch (_) {}
+      setStreamStatus('✗ ' + detail, 'err');
+      return;
+    }
+
+    const blob   = await resp.blob();
+    const url    = URL.createObjectURL(blob);
+    const video  = document.getElementById('generatedVideo');
+    video.src    = url;
+    document.getElementById('downloadLink').href = url;
+    document.getElementById('generatedSection').style.display = 'block';
+    video.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    setStreamStatus('✓ Video ready', 'ok');
+  } catch (err) {
+    setStreamStatus('✗ ' + err.message, 'err');
+  } finally {
+    sendBtn.textContent = '↓ Generate';
+    updateStartBtn();   // re-enables both buttons based on current selection
+  }
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────────

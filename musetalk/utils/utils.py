@@ -66,8 +66,14 @@ def datagen(
             yield whisper_batch, latent_batch
             whisper_batch, latent_batch  = [], []
 
-    # the last batch may smaller than batch size
+    # Pad the last (potentially partial) batch to batch_size so every yield has
+    # the same shape.  Stable shapes are required for CUDA graph capture inside
+    # torch.compile(mode="reduce-overhead").  Callers already guard with
+    # `if local >= n_frames: break` so extra padded frames are never used.
     if len(latent_batch) > 0:
+        while len(latent_batch) < batch_size:
+            whisper_batch.append(whisper_batch[-1])
+            latent_batch.append(latent_batch[-1])
         whisper_batch = torch.stack(whisper_batch)
         latent_batch = torch.cat(latent_batch, dim=0)
 

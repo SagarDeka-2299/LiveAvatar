@@ -1,0 +1,45 @@
+services:
+  liveavatar:
+    build: .
+    image: liveavatar:latest
+    ports:
+      - "7860:7860"
+    volumes:
+      # Model weights (~8.7 GB) — download once with download_weights.sh, then mount here
+      - ./models:/app/models
+      # Avatar video sequence embeddings (VAE latents, coords, frames, masks) + SQLite registry.
+      # avatars.db lives inside results/ so both are covered by one named volume.
+      - avatar_data:/app/results
+      # Temporary upload storage
+      - ./uploads:/app/uploads
+      # torch.hub cache — avoids re-downloading S3FD and other auto-fetched weights
+      - torch_hub_cache:/root/.cache/torch/hub
+      # HuggingFace cache — avoids re-downloading tokenizer configs etc.
+      - hf_cache:/root/.cache/huggingface
+      # Triton/inductor compiled kernel cache — only useful when TORCH_COMPILE=1
+      - torch_compile_cache:/tmp/torchinductor_root
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      # Set to 1 to enable torch.compile (faster inference, but slow cold-start on first run
+      # until kernels are compiled and cached in the torch_compile_cache volume above).
+      - TORCH_COMPILE=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+volumes:
+  avatar_data:
+  torch_hub_cache:
+  hf_cache:
+  torch_compile_cache:

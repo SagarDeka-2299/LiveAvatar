@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import copy
@@ -14,11 +15,11 @@ from datetime import datetime
 from argparse import Namespace
 from contextlib import asynccontextmanager
 
+import time
 import cv2
 import torch
 import numpy as np
-import librosa
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, Form, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
 
 from transformers import WhisperModel
@@ -41,14 +42,23 @@ from musetalk.utils.face_parsing import FaceParsing
 import scripts.realtime_inference as rt
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-VERSION      = "v15"
-GPU_ID       = 0
-BATCH_SIZE   = 4
-FPS          = 25
+VERSION       = "v15"
+GPU_ID        = 0
+BATCH_SIZE    = 4
+FPS           = 24          # fixed output frame rate
+# Set to True to apply torch.compile to UNet, VAE decoder, and Whisper encoder.
+# First inference after startup will be slow (~30-60 s) while Triton compiles;
+# every subsequent call is significantly faster.
+# Set to False for faster cold-start during development.
+TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
 AUDIO_PAD_L  = 2
 AUDIO_PAD_R  = 2
 EXTRA_MARGIN = 10
 PARSING_MODE = "jaw"
+
+# One processing window = 1 second = FPS frames = 16000 samples at 16 kHz.
+# Keep STREAM_CHUNK_FRAMES == FPS so the window is always exactly 1 second.
+STREAM_CHUNK_FRAMES = 24   # must equal FPS
 
 ARGS = Namespace(
     version=VERSION, extra_margin=EXTRA_MARGIN, parsing_mode=PARSING_MODE,
@@ -56,11 +66,38 @@ ARGS = Namespace(
     skip_save_images=True,
 )
 
-DB_PATH = "./avatars.db"
+DB_PATH = "./results/avatars.db"
 
 # ── Model globals ──────────────────────────────────────────────────────────────
 device = vae = unet = pe = timesteps = None
 whisper = audio_processor = fp = weight_dtype = None
+
+
+def _warmup_models():
+    """
+    Run one dummy forward pass through each compiled model so that Triton/TRT
+    JIT compilation fires at startup rather than on the first real request.
+    Typical cost: 30-60 s the first time, cached on subsequent restarts.
+    """
+    t0 = time.time()
+    print("[WARMUP] Warming up compiled models…", flush=True)
+    with torch.no_grad():
+        # UNet: always [BATCH_SIZE, 8, 32, 32] latents + [BATCH_SIZE, 50, 384] audio
+        dummy_lb = torch.zeros(BATCH_SIZE, 8, 32, 32, dtype=weight_dtype, device=device)
+        dummy_af = torch.zeros(BATCH_SIZE, 50, 384,  dtype=weight_dtype, device=device)
+        _ = unet.model(dummy_lb, timesteps, encoder_hidden_states=dummy_af).sample
+
+        # VAE decoder: [BATCH_SIZE, 4, 32, 32]
+        dummy_lat = torch.zeros(BATCH_SIZE, 4, 32, 32, dtype=weight_dtype, device=device)
+        _ = vae.vae.decode(dummy_lat)
+
+        # Whisper encoder: [1, 80, 3000] mel spectrogram
+        dummy_mel = torch.zeros(1, 80, 3000, dtype=weight_dtype, device=device)
+        _ = whisper.encoder(dummy_mel, output_hidden_states=True)
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    print(f"[WARMUP] Done in {time.time() - t0:.1f}s", flush=True)
 
 
 def _load_models():
@@ -81,6 +118,27 @@ def _load_models():
     rt.timesteps = timesteps; rt.whisper = whisper
     rt.audio_processor = audio_processor; rt.fp = fp
     rt.device = device; rt.weight_dtype = weight_dtype
+
+    # ── Acceleration ───────────────────────────────────────────────────────────
+    # TF32 matmuls: free accuracy-neutral speedup on Ampere/Ada GPUs (L4 included)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32       = True
+
+    if TORCH_COMPILE and device.type == "cuda":
+        print("[COMPILE] Applying torch.compile(mode='reduce-overhead') …", flush=True)
+        # UNet: called as unet.model(lb, timesteps, encoder_hidden_states=af)
+        # — compile the nn.Module directly so __call__ → forward is optimized.
+        unet.model = torch.compile(unet.model, mode="reduce-overhead", fullgraph=False)
+
+        # VAE: vae.vae.decode() calls post_quant_conv → decoder internally.
+        # Compile the decoder sub-module (the heavy part); post_quant_conv is trivial.
+        vae.vae.decoder = torch.compile(vae.vae.decoder, mode="reduce-overhead", fullgraph=False)
+
+        # Whisper: called as whisper.encoder(mel, output_hidden_states=True)
+        whisper.encoder = torch.compile(whisper.encoder, mode="reduce-overhead", fullgraph=False)
+
+        print("[COMPILE] Done. Triggering JIT warmup…", flush=True)
+        _warmup_models()
 
 
 def _init_db():
@@ -119,7 +177,7 @@ def db_list_avatars():
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, name, created_at, thumbnail_path "
+        "SELECT id, name, created_at, video_path, thumbnail_path "
         "FROM avatars ORDER BY created_at DESC"
     ).fetchall()
     con.close()
@@ -173,11 +231,73 @@ async def get_thumbnail(avatar_id: str):
     return FileResponse(str(p), media_type="image/jpeg")
 
 
+@app.get("/avatars/{avatar_id}/video")
+async def get_avatar_video(avatar_id: str):
+    row = db_get_avatar(avatar_id)
+    if not row or not row.get("video_path"):
+        return Response(status_code=404)
+    p = Path(row["video_path"])
+    if not p.exists():
+        return Response(status_code=404)
+    return FileResponse(str(p), media_type="video/mp4")
+
+
 @app.delete("/avatars/{avatar_id}")
 async def delete_avatar(avatar_id: str):
     db_delete_avatar(avatar_id)
     _avatar_cache.pop(avatar_id, None)
     return {"ok": True}
+
+
+@app.post("/generate")
+async def generate_endpoint(
+    avatar_id: str      = Form(...),
+    audio:     UploadFile = File(...),
+):
+    """
+    Full offline inference: POST multipart(avatar_id, audio file) → MP4 download.
+    Blocks until the entire video is rendered, then returns it as video/mp4.
+    """
+    # Load (or cache-hit) the avatar
+    try:
+        avatar = await asyncio.get_running_loop().run_in_executor(
+            _thread_pool, _load_avatar, avatar_id
+        )
+    except Exception as exc:
+        return Response(
+            content=json.dumps({"error": str(exc)}),
+            status_code=400, media_type="application/json",
+        )
+
+    # Save uploaded audio to a temp file so librosa can read it
+    audio_bytes = await audio.read()
+    suffix      = Path(audio.filename).suffix if audio.filename else ".wav"
+    fd, audio_path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    try:
+        with open(audio_path, "wb") as f:
+            f.write(audio_bytes)
+
+        video_bytes = await asyncio.get_running_loop().run_in_executor(
+            _thread_pool, _generate_video_sync, avatar, audio_path
+        )
+        return Response(
+            content=video_bytes,
+            media_type="video/mp4",
+            headers={"Content-Disposition": 'inline; filename="output.mp4"'},
+        )
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return Response(
+            content=json.dumps({"error": str(exc)}),
+            status_code=500, media_type="application/json",
+        )
+    finally:
+        try:
+            os.unlink(audio_path)
+        except Exception:
+            pass
 
 
 # ── Avatar helpers ─────────────────────────────────────────────────────────────
@@ -244,108 +364,296 @@ def _pack_frame(frame_idx: int, jpeg_bytes: bytes, pcm: np.ndarray) -> bytes:
     return header + jpeg_bytes + pcm_f32
 
 
-def _run_inference_ws(
-    avatar, audio_path: str,
-    q: asyncio.Queue, loop,
-    start_q: asyncio.Queue,
+# ── Full offline inference (audio file → MP4 bytes) ───────────────────────────
+def _generate_video_sync(avatar, audio_path: str) -> bytes:
+    """
+    Blocking helper (runs in thread pool).
+    Loads audio_path (any format librosa accepts), runs the full inference
+    pipeline, and returns the final MP4 as raw bytes (video + audio muxed).
+    """
+    # 1. Extract Whisper features (audio_processor.get_audio_feature uses
+    #    librosa internally and resamples to 16 kHz automatically)
+    result = audio_processor.get_audio_feature(audio_path, weight_dtype=weight_dtype)
+    if result is None:
+        raise ValueError(f"Could not load audio: {audio_path}")
+    feats, lib_len = result
+
+    whisper_chunks = audio_processor.get_whisper_chunk(
+        feats, device, weight_dtype, whisper, lib_len,
+        fps=FPS,
+        audio_padding_length_left=AUDIO_PAD_L,
+        audio_padding_length_right=AUDIO_PAD_R,
+    )
+    n_frames = len(whisper_chunks)
+    if n_frames == 0:
+        raise ValueError("Audio too short — no frames extracted.")
+
+    # 2. Run UNet + VAE for every frame
+    gen = datagen(whisper_chunks, avatar.input_latent_list_cycle, BATCH_SIZE)
+    res_frames = []
+    local = 0
+    with torch.no_grad():
+        for wb, lb in gen:
+            if local >= n_frames:
+                break
+            af  = pe(wb.to(device))
+            lb  = lb.to(device=device, dtype=unet.model.dtype)
+            out = unet.model(lb, timesteps, encoder_hidden_states=af).sample
+            out = out.to(device=device, dtype=vae.vae.dtype)
+            for frame in vae.decode_latents(out):
+                if local >= n_frames:
+                    break
+                res_frames.append(_blend(avatar, frame, local))
+                local += 1
+
+    if not res_frames:
+        raise ValueError("Inference produced no frames.")
+
+    # 3. Pipe frames to ffmpeg → silent MP4, then mux with original audio
+    h, w = res_frames[0].shape[:2]
+    fd_s, silent_path = tempfile.mkstemp(suffix="_silent.mp4")
+    fd_o, out_path    = tempfile.mkstemp(suffix="_final.mp4")
+    os.close(fd_s)
+    os.close(fd_o)
+    try:
+        import subprocess
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{w}x{h}", "-pix_fmt", "bgr24",
+                "-r", str(FPS), "-i", "pipe:0",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+                silent_path,
+            ],
+            stdin=subprocess.PIPE,
+        )
+        for frame in res_frames:
+            proc.stdin.write(frame.tobytes())
+        proc.stdin.close()
+        proc.wait()
+
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", silent_path,
+                "-i", audio_path,
+                "-c:v", "copy", "-c:a", "aac", "-shortest",
+                out_path,
+            ],
+            check=True,
+        )
+
+        with open(out_path, "rb") as f:
+            return f.read()
+    finally:
+        for p in (silent_path, out_path):
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
+
+# ── Streaming inference (chunk-by-chunk) ──────────────────────────────────────
+def _run_streaming_inference(
+    avatar,
+    audio_q: asyncio.Queue,
+    out_q: asyncio.Queue,
+    loop,
 ):
     """
-    Background thread: runs GPU inference and pushes tuples into q:
-      ('text', json_str)  — control messages (stream_meta, done)
-      ('bytes', bytes)    — binary frame packets (jpeg + pcm)
-    Signals start_q after the first batch of frames is queued.
+    Background thread.  Receives raw float32 PCM at exactly 16 kHz (mono)
+    from audio_q and emits packed video+audio frame packets into out_q.
+
+    Fixed pipeline parameters:
+      Input audio  : 16 kHz float32 mono (client must resample before sending)
+      Output video : FPS=24 fps
+      Window size  : STREAM_CHUNK_FRAMES=24 frames = 16000 samples = 1 second
+
+    Packet format (binary):
+      [uint32 frame_idx][uint32 jpeg_len][uint32 pcm_samples][jpeg][pcm_f32]
+
+    Queue protocol:
+      audio_q → numpy float32 arrays (16 kHz PCM chunks) | None (end sentinel)
+      out_q   ← ('text', json_str) | ('bytes', bytes)    | None (end sentinel)
     """
-    first_batch_signaled = False
-
-    def _signal():
-        nonlocal first_batch_signaled
-        if not first_batch_signaled:
-            first_batch_signaled = True
-            asyncio.run_coroutine_threadsafe(start_q.put(True), loop).result()
-
     def _put(item):
-        asyncio.run_coroutine_threadsafe(q.put(item), loop).result()
+        asyncio.run_coroutine_threadsafe(out_q.put(item), loop).result()
 
-    try:
-        # Load audio PCM (original sample rate, mono float32)
-        y, sr = librosa.load(audio_path, sr=None, mono=True)
-        spf   = sr / FPS  # samples per frame
+    def _get():
+        return asyncio.run_coroutine_threadsafe(audio_q.get(), loop).result()
 
-        # Whisper features
-        feats, lib_len = audio_processor.get_audio_feature(
-            audio_path, weight_dtype=weight_dtype
+    INPUT_SR      = 16000
+    spf           = INPUT_SR / FPS          # samples per video frame ≈ 666.67 @ 24 fps
+    chunk_samples = INPUT_SR               # 1 second = 16000 samples
+
+    # Single accumulator at 16 kHz.  Never trimmed — absolute frame_idx
+    # indexing requires the full history from sample 0.
+    all_pcm   = np.array([], dtype=np.float32)
+    processed = 0       # 16 kHz samples consumed so far
+    frame_idx = 0       # global output frame counter
+
+    # Latency tracking
+    t_stream     = time.time()
+    timing       = {"first_audio": None, "first_frame": None, "chunk_n": 0}
+
+    def _infer_window(window: np.ndarray):
+        """Whisper → PE → UNet → VAE decoder → blend → pack, for one 1-second window."""
+        nonlocal frame_idx
+        t0 = time.time()
+
+        feats, lib_len = audio_processor.get_audio_feature_from_array(
+            window, weight_dtype=weight_dtype
         )
-        chunks = audio_processor.get_whisper_chunk(
+        whisper_chunks = audio_processor.get_whisper_chunk(
             feats, device, weight_dtype, whisper, lib_len,
-            fps=FPS, audio_padding_length_left=AUDIO_PAD_L,
+            fps=FPS,
+            audio_padding_length_left=AUDIO_PAD_L,
             audio_padding_length_right=AUDIO_PAD_R,
         )
-        total_frames = len(chunks)
+        n_frames = len(whisper_chunks)
+        if n_frames == 0:
+            return
 
-        _put(("text", json.dumps({
-            "type": "stream_meta",
-            "fps": FPS,
-            "sample_rate": int(sr),
-            "total_frames": total_frames,
-        })))
+        gen = datagen(
+            whisper_chunks, avatar.input_latent_list_cycle,
+            BATCH_SIZE, delay_frame=frame_idx,
+        )
 
-        frame_idx = 0
-        gen = datagen(chunks, avatar.input_latent_list_cycle, BATCH_SIZE)
-
+        local = 0
         with torch.no_grad():
             for wb, lb in gen:
-                if frame_idx >= total_frames:
+                if local >= n_frames:
                     break
-
                 af  = pe(wb.to(device))
                 lb  = lb.to(device=device, dtype=unet.model.dtype)
                 out = unet.model(lb, timesteps, encoder_hidden_states=af).sample
                 out = out.to(device=device, dtype=vae.vae.dtype)
 
                 for frame in vae.decode_latents(out):
-                    if frame_idx >= total_frames:
+                    if local >= n_frames:
                         break
-
                     combined = _blend(avatar, frame, frame_idx)
                     ok, jpeg = cv2.imencode(
                         ".jpg", combined, [cv2.IMWRITE_JPEG_QUALITY, 85]
                     )
                     if not ok:
                         frame_idx += 1
+                        local     += 1
                         continue
 
+                    # Slice exactly 1/FPS seconds of 16 kHz audio for this frame
                     a0  = int(round(frame_idx * spf))
                     a1  = int(round((frame_idx + 1) * spf))
-                    pcm = y[a0:a1] if a1 <= len(y) else np.zeros(int(spf), np.float32)
+                    pcm = (
+                        all_pcm[a0:a1].copy()
+                        if a1 <= len(all_pcm)
+                        else np.zeros(int(spf), dtype=np.float32)
+                    )
                     if len(pcm) == 0:
-                        pcm = np.zeros(int(spf), np.float32)
+                        pcm = np.zeros(int(spf), dtype=np.float32)
+
+                    # Log when the very first frame is ready
+                    if timing["first_frame"] is None:
+                        timing["first_frame"] = time.time()
+                        delay_ms = (timing["first_frame"] - timing["first_audio"]) * 1000
+                        print(
+                            f"[LATENCY] First frame ready — pipeline_delay={delay_ms:.0f}ms",
+                            flush=True,
+                        )
 
                     _put(("bytes", _pack_frame(frame_idx, jpeg.tobytes(), pcm)))
                     frame_idx += 1
+                    local     += 1
 
-                # Signal after first batch is fully queued
-                _signal()
+        elapsed = time.time() - t0
+        timing["chunk_n"] += 1
+        print(
+            f"[LATENCY] Chunk {timing['chunk_n']}: {n_frames} frames in "
+            f"{elapsed * 1000:.0f}ms  ({n_frames / elapsed:.1f} fps throughput)",
+            flush=True,
+        )
 
-    except Exception:
-        _signal()
-        raise
+    try:
+        while True:
+            chunk = _get()
+            if chunk is None:
+                break
+
+            if timing["first_audio"] is None:
+                timing["first_audio"] = time.time()
+                print(
+                    f"[LATENCY] First audio chunk received at "
+                    f"t+{timing['first_audio'] - t_stream:.3f}s",
+                    flush=True,
+                )
+
+            # Accumulate 16 kHz PCM (client already resampled)
+            all_pcm = np.concatenate([all_pcm, chunk])
+
+            # Process every complete 1-second window
+            while len(all_pcm) - processed >= chunk_samples:
+                window = all_pcm[processed: processed + chunk_samples]
+                _infer_window(window)
+                processed += chunk_samples
+
+        # Flush any remaining audio — pad to full window so Whisper's
+        # zero-padding geometry guarantees actual_length ≥ 50 frames.
+        remaining = all_pcm[processed:]
+        if len(remaining) > 0:
+            if len(remaining) < chunk_samples:
+                remaining = np.pad(remaining, (0, chunk_samples - len(remaining)))
+            _infer_window(remaining)
+
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        _put(("text", json.dumps({"type": "error", "detail": str(exc)})))
     finally:
-        _signal()
         _put(("text", json.dumps({"type": "done"})))
         _put(None)
-        try:
-            os.unlink(audio_path)
-        except OSError:
-            pass
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
-    loop    = asyncio.get_event_loop()
-    state   = "idle"
-    pending = {}
+    loop      = asyncio.get_event_loop()
+    state     = "idle"
+    pending   = {}
+    send_lock = asyncio.Lock()
+    drain_task = None
+
+    # ── Serialised send helpers ────────────────────────────────────────────────
+    async def _send_json(obj):
+        async with send_lock:
+            await websocket.send_json(obj)
+
+    async def _send_text(text):
+        async with send_lock:
+            await websocket.send_text(text)
+
+    async def _send_bytes(data):
+        async with send_lock:
+            await websocket.send_bytes(data)
+
+    # ── Drain task: reads out_q and forwards to the WebSocket ─────────────────
+    async def _drain_out():
+        q = pending.get("out_q")
+        if q is None:
+            return
+        while True:
+            item = await q.get()
+            if item is None:
+                break
+            mt, d = item
+            try:
+                if mt == "text":
+                    await _send_text(d)
+                else:
+                    await _send_bytes(d)
+            except Exception:
+                break
 
     try:
         while True:
@@ -357,7 +665,7 @@ async def ws_endpoint(websocket: WebSocket):
                 kind = data.get("type")
 
                 if kind == "list_avatars":
-                    await websocket.send_json({
+                    await _send_json({
                         "type": "avatars",
                         "list": db_list_avatars(),
                     })
@@ -369,12 +677,65 @@ async def ws_endpoint(websocket: WebSocket):
                         "bbox_shift": data.get("bbox_shift", 0),
                     }
 
-                elif kind == "stream":
-                    state   = "expecting_audio"
-                    pending = {
-                        "avatar_id": data.get("avatar_id"),
-                        "filename":  data.get("filename", "audio.wav"),
-                    }
+                # ── Pre-load avatar into cache ─────────────────────────────────
+                elif kind == "preload_avatar":
+                    avatar_id = data.get("avatar_id")
+                    if not avatar_id:
+                        await _send_json({"type": "error", "detail": "No avatar_id."})
+                    else:
+                        try:
+                            await loop.run_in_executor(
+                                _thread_pool, _load_avatar, avatar_id
+                            )
+                            await _send_json({
+                                "type":      "avatar_loaded",
+                                "avatar_id": avatar_id,
+                            })
+                        except Exception as exc:
+                            await _send_json({"type": "error", "detail": str(exc)})
+
+                # ── Begin streaming session ────────────────────────────────────
+                elif kind == "stream_start":
+                    avatar_id = data.get("avatar_id")
+                    if not avatar_id:
+                        await _send_json({"type": "error", "detail": "No avatar_id."})
+                        continue
+
+                    try:
+                        avatar = await loop.run_in_executor(
+                            _thread_pool, _load_avatar, avatar_id
+                        )
+                    except Exception as exc:
+                        await _send_json({"type": "error", "detail": str(exc)})
+                        continue
+
+                    audio_q = asyncio.Queue(maxsize=128)
+                    out_q   = asyncio.Queue(maxsize=512)
+                    pending["audio_q"] = audio_q
+                    pending["out_q"]   = out_q
+
+                    # Pipeline is fixed at 16 kHz input / FPS output.
+                    # Client must resample to 16 kHz before sending.
+                    _thread_pool.submit(
+                        _run_streaming_inference,
+                        avatar, audio_q, out_q, loop,
+                    )
+
+                    await _send_json({
+                        "type":         "stream_meta",
+                        "fps":          FPS,
+                        "sample_rate":  16000,  # fixed: pipeline always runs at 16 kHz
+                        "total_frames": -1,     # unknown in streaming mode
+                    })
+
+                    state      = "streaming"
+                    drain_task = asyncio.create_task(_drain_out())
+
+                # ── End streaming session ──────────────────────────────────────
+                elif kind == "stream_end":
+                    if state == "streaming" and "audio_q" in pending:
+                        await pending["audio_q"].put(None)
+                        state = "idle"
 
             # ── Binary ────────────────────────────────────────────────────────
             elif "bytes" in msg:
@@ -408,9 +769,11 @@ async def ws_endpoint(websocket: WebSocket):
                             loop.call_soon_threadsafe(prog_q.put_nowait, {
                                 "type": "ready",
                                 "avatar": {
-                                    "id":         avatar_id,
-                                    "name":       name,
-                                    "created_at": datetime.utcnow().isoformat(),
+                                    "id":             avatar_id,
+                                    "name":           name,
+                                    "created_at":     datetime.utcnow().isoformat(),
+                                    "video_path":     video_path,
+                                    "thumbnail_path": thumb_path,
                                 },
                             })
                         except Exception as exc:
@@ -422,70 +785,31 @@ async def ws_endpoint(websocket: WebSocket):
                     while True:
                         try:
                             result = await asyncio.wait_for(prog_q.get(), timeout=4.0)
-                            await websocket.send_json(result)
+                            await _send_json(result)
                             break
                         except asyncio.TimeoutError:
-                            await websocket.send_json({"type": "preparing"})
+                            await _send_json({"type": "preparing"})
 
-                # ── Run inference ──────────────────────────────────────────────
-                elif state == "expecting_audio":
-                    state     = "idle"
-                    avatar_id = pending["avatar_id"]
-                    if not avatar_id:
-                        await websocket.send_json(
-                            {"type": "error", "detail": "No avatar_id."})
-                        continue
-
-                    try:
-                        avatar = await loop.run_in_executor(
-                            _thread_pool, _load_avatar, avatar_id
-                        )
-                    except Exception as exc:
-                        await websocket.send_json(
-                            {"type": "error", "detail": str(exc)})
-                        continue
-
-                    suffix = Path(pending["filename"]).suffix or ".wav"
-                    tmp    = tempfile.NamedTemporaryFile(
-                        delete=False, suffix=suffix, dir="./uploads"
-                    )
-                    tmp.write(raw)
-                    tmp.close()
-
-                    pkt_q:   asyncio.Queue = asyncio.Queue(maxsize=256)
-                    start_q: asyncio.Queue = asyncio.Queue()
-
-                    _thread_pool.submit(
-                        _run_inference_ws, avatar, tmp.name,
-                        pkt_q, loop, start_q,
-                    )
-
-                    # Wait until first batch is buffered
-                    while True:
-                        try:
-                            await asyncio.wait_for(start_q.get(), timeout=3.0)
-                            break
-                        except asyncio.TimeoutError:
-                            await websocket.send_json({"type": "buffering"})
-
-                    # Drain queue → WebSocket
-                    while True:
-                        item = await pkt_q.get()
-                        if item is None:
-                            break
-                        msg_type, data = item
-                        if msg_type == "text":
-                            await websocket.send_text(data)
-                        else:
-                            await websocket.send_bytes(data)
+                # ── Streaming audio chunk ──────────────────────────────────────
+                elif state == "streaming":
+                    pcm = np.frombuffer(raw, dtype=np.float32).copy()
+                    await pending["audio_q"].put(pcm)
 
     except WebSocketDisconnect:
         pass
     except Exception as exc:
         try:
-            await websocket.send_json({"type": "error", "detail": str(exc)})
+            await _send_json({"type": "error", "detail": str(exc)})
         except Exception:
             pass
+    finally:
+        if drain_task:
+            drain_task.cancel()
+        if "audio_q" in pending:
+            try:
+                pending["audio_q"].put_nowait(None)
+            except Exception:
+                pass
 
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
