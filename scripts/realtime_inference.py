@@ -34,18 +34,37 @@ def fast_check_ffmpeg():
         return False
 
 
-def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000):
+def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000, target_fps=None):
     cap = cv2.VideoCapture(vid_path)
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
     count = 0
+    frame_idx = 0
+    next_keep_time = 0.0
+    use_downsample = bool(target_fps and source_fps and source_fps > target_fps + 0.01)
+    if use_downsample:
+        print(
+            f"[PREP] Downsampling avatar source from {source_fps:.2f} fps to {target_fps:.2f} fps",
+            flush=True,
+        )
+
     while True:
         if count > cut_frame:
             break
         ret, frame = cap.read()
-        if ret:
+        if not ret:
+            break
+        keep = True
+        if use_downsample:
+            frame_time = frame_idx / source_fps
+            keep = frame_time + 1e-9 >= next_keep_time
+        if keep:
             cv2.imwrite(f"{save_path}/{count:08d}.png", frame)
             count += 1
-        else:
-            break
+            if use_downsample:
+                next_keep_time = count / target_fps
+        frame_idx += 1
+    cap.release()
+    return {"source_fps": source_fps, "saved_frames": count}
 
 
 def osmakedirs(path_list):
@@ -77,12 +96,22 @@ class Avatar:
             "avatar_id": avatar_id,
             "video_path": video_path,
             "bbox_shift": bbox_shift,
-            "version": args.version
+            "version": args.version,
+            "target_fps": getattr(args, "target_fps", None),
         }
         self.preparation = preparation
         self.batch_size = batch_size
         self.idx = 0
         self.init()
+
+    def _load_latents(self):
+        """Load latent cycle from disk and pre-stack into a single fp16 CUDA
+        tensor so datagen can use integer indexing instead of torch.cat."""
+        raw = torch.load(self.latents_out_path, weights_only=False)
+        # raw is a list of [1, 8, 32, 32] tensors (fp32, on CUDA)
+        stacked = torch.cat(raw, dim=0)          # [N, 8, 32, 32] fp32
+        stacked = stacked.to(device=device, dtype=weight_dtype)  # fp16, CUDA
+        self.input_latent_list_cycle = stacked
 
     def init(self):
         if self.preparation:
@@ -96,7 +125,7 @@ class Avatar:
                     osmakedirs([self.avatar_path, self.full_imgs_path, self.video_out_path, self.mask_out_path])
                     self.prepare_material()
                 else:
-                    self.input_latent_list_cycle = torch.load(self.latents_out_path)
+                    self._load_latents()
                     with open(self.coords_path, 'rb') as f:
                         self.coord_list_cycle = pickle.load(f)
                     input_img_list = glob.glob(os.path.join(self.full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
@@ -151,7 +180,15 @@ class Avatar:
             json.dump(self.avatar_info, f)
 
         if os.path.isfile(self.video_path):
-            video2imgs(self.video_path, self.full_imgs_path, ext='png')
+            prep_meta = video2imgs(
+                self.video_path,
+                self.full_imgs_path,
+                ext='png',
+                target_fps=getattr(args, "target_fps", None),
+            )
+            self.avatar_info.update(prep_meta)
+            with open(self.avatar_info_path, "w") as f:
+                json.dump(self.avatar_info, f)
         else:
             print(f"copy files in {self.video_path}")
             files = os.listdir(self.video_path)
@@ -183,7 +220,9 @@ class Avatar:
 
         self.frame_list_cycle = frame_list + frame_list[::-1]
         self.coord_list_cycle = coord_list + coord_list[::-1]
-        self.input_latent_list_cycle = input_latent_list + input_latent_list[::-1]
+        latent_cycle = input_latent_list + input_latent_list[::-1]
+        torch.save(latent_cycle, self.latents_out_path)
+        self._load_latents()  # stack + cast to fp16 in VRAM
         self.mask_coords_list_cycle = []
         self.mask_list_cycle = []
 
@@ -206,8 +245,6 @@ class Avatar:
 
         with open(self.coords_path, 'wb') as f:
             pickle.dump(self.coord_list_cycle, f)
-
-        torch.save(self.input_latent_list_cycle, os.path.join(self.latents_out_path))
 
     def process_frames(self, res_frame_queue, video_len, skip_save_images):
         print(video_len)

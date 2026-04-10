@@ -8,13 +8,14 @@ import struct
 import asyncio
 import sqlite3
 import tempfile
-import builtins
+import builtins 
 import concurrent.futures
 from pathlib import Path
 from datetime import datetime
 from argparse import Namespace
 from contextlib import asynccontextmanager
 
+import torch.nn.functional as F # Added pytorch functional import
 import time
 import cv2
 import torch
@@ -46,26 +47,30 @@ VERSION       = "v15"
 GPU_ID        = 0
 BATCH_SIZE    = 4
 FPS           = 24          # fixed output frame rate
+STREAM_FPS    = 20          # lighter realtime preview path
 # Set to True to apply torch.compile to UNet, VAE decoder, and Whisper encoder.
 # First inference after startup will be slow (~30-60 s) while Triton compiles;
 # every subsequent call is significantly faster.
 # Set to False for faster cold-start during development.
 TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
+
 AUDIO_PAD_L  = 2
 AUDIO_PAD_R  = 2
 EXTRA_MARGIN = 10
 PARSING_MODE = "jaw"
 
 # One processing window = 1 second = FPS frames = 16000 samples at 16 kHz.
-# Keep STREAM_CHUNK_FRAMES == FPS so the window is always exactly 1 second.
-STREAM_CHUNK_FRAMES = 24   # must equal FPS
-
+# We still infer on a full second of context, but in streaming mode we advance
+# the window every 250 ms so output arrives more smoothly instead of in 1 s bursts.
+STREAM_CHUNK_FRAMES = STREAM_FPS   # 1 second of realtime preview context
+STREAM_HOP_FRAMES   = max(1, STREAM_FPS // 4)    # 250 ms hop
 ARGS = Namespace(
     version=VERSION, extra_margin=EXTRA_MARGIN, parsing_mode=PARSING_MODE,
     audio_padding_length_left=AUDIO_PAD_L, audio_padding_length_right=AUDIO_PAD_R,
+    target_fps=FPS,
     skip_save_images=True,
 )
-
+#Database
 DB_PATH = "./results/avatars.db"
 
 # ── Model globals ──────────────────────────────────────────────────────────────
@@ -342,19 +347,110 @@ def _extract_thumbnail(video_path: str, out_path: str) -> bool:
     return False
 
 
-def _blend(avatar, res_frame, idx):
-    n    = len(avatar.coord_list_cycle)
-    bbox = avatar.coord_list_cycle[idx % n]
-    ori  = copy.deepcopy(
-        avatar.frame_list_cycle[idx % len(avatar.frame_list_cycle)]
-    )
+# --- GPU AVATAR CACHE ---
+_gpu_avatar_cache = {}
+
+def _prepare_avatar_on_gpu(avatar):
+    """Pre-loads the avatar's background frames and masks into VRAM for zero-transfer blending."""
+    if avatar.avatar_id in _gpu_avatar_cache:
+        return _gpu_avatar_cache[avatar.avatar_id]
+
+    print(f"[OPTIMIZATION] Caching avatar '{avatar.avatar_id}' frames/masks to VRAM...", flush=True)
+    gpu_frames = []
+    gpu_masks = []
+    
+    with torch.no_grad():
+        for frame in avatar.frame_list_cycle:
+            # Convert HWC numpy to Tensor, keep on GPU
+            t_frame = torch.from_numpy(frame).to(device).float()
+            gpu_frames.append(t_frame)
+            
+        for mask in avatar.mask_list_cycle:
+            # Convert to Tensor, normalize to 0-1, add channel dim for broadcasting
+            t_mask = torch.from_numpy(mask).to(device).float() / 255.0
+            t_mask = t_mask.unsqueeze(-1) 
+            gpu_masks.append(t_mask)
+
+    cache = {"frames": gpu_frames, "masks": gpu_masks}
+    _gpu_avatar_cache[avatar.avatar_id] = cache
+    return cache
+
+def _blend_reference(avatar, res_frame, idx):
+    """Stable reference blender used for realtime streaming."""
+    idx_coord = idx % len(avatar.coord_list_cycle)
+    bbox = avatar.coord_list_cycle[idx_coord]
     x1, y1, x2, y2 = bbox
-    face = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
-    mask = avatar.mask_list_cycle[idx % len(avatar.mask_list_cycle)]
-    cbox = avatar.mask_coords_list_cycle[
-        idx % len(avatar.mask_coords_list_cycle)
-    ]
-    return get_image_blending(ori, face, bbox, mask, cbox)
+
+    idx_frame = idx % len(avatar.frame_list_cycle)
+    idx_mask = idx % len(avatar.mask_list_cycle)
+    idx_cbox = idx % len(avatar.mask_coords_list_cycle)
+
+    ori_frame = copy.deepcopy(avatar.frame_list_cycle[idx_frame])
+    resized_face = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
+    return np.ascontiguousarray(
+        get_image_blending(
+            ori_frame,
+            resized_face,
+            bbox,
+            avatar.mask_list_cycle[idx_mask],
+            avatar.mask_coords_list_cycle[idx_cbox],
+        )
+    )
+
+def _blend(avatar, res_frame, idx):
+    """Ultra-fast PyTorch GPU blending. Replaces OpenCV CPU bottleneck."""
+    # 1. Ensure avatar assets are pre-loaded on the GPU
+    gpu_assets = _prepare_avatar_on_gpu(avatar)
+    
+    # 2. Get coordinates
+    idx_coord = idx % len(avatar.coord_list_cycle)
+    bbox = avatar.coord_list_cycle[idx_coord]
+    x1, y1, x2, y2 = bbox
+    target_w, target_h = x2 - x1, y2 - y1
+    
+    idx_frame = idx % len(avatar.frame_list_cycle)
+    idx_mask = idx % len(avatar.mask_list_cycle)
+    idx_cbox = idx % len(avatar.mask_coords_list_cycle)
+    
+    # 3. Fetch pre-loaded GPU tensors
+    ori_t = gpu_assets["frames"][idx_frame].clone() # Clone to avoid overwriting the cached original
+    mask_t = gpu_assets["masks"][idx_mask]
+    cbox = avatar.mask_coords_list_cycle[idx_cbox]
+    
+    try:
+        with torch.no_grad():
+            # Move generated face to GPU (it's a small array, so this is very fast)
+            face_t = torch.from_numpy(res_frame.astype(np.float32)).to(device, non_blocking=True)
+
+            # Resize face using PyTorch (requires NCHW layout)
+            face_t = face_t.permute(2, 0, 1).unsqueeze(0)
+            face_resized = F.interpolate(
+                face_t,
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            face_resized = face_resized.squeeze(0).permute(1, 2, 0)
+
+            # Some prepared avatars carry masks/crop boxes whose geometry matches the
+            # larger crop region used by MuseTalk's reference blender, not the face bbox.
+            # If that happens, fall back to the reference implementation instead of
+            # crashing the whole request.
+            mask_crop = mask_t[cbox[1]:cbox[3], cbox[0]:cbox[2]]
+            ori_crop = ori_t[y1:y2, x1:x2]
+            if mask_crop.ndim == 2:
+                mask_crop = mask_crop.unsqueeze(-1)
+            if mask_crop.shape[:2] != ori_crop.shape[:2] or mask_crop.shape[-1] not in (1, 3):
+                raise RuntimeError(
+                    f"Incompatible mask geometry: mask={tuple(mask_crop.shape)} crop={tuple(ori_crop.shape)}"
+                )
+
+            ori_t[y1:y2, x1:x2] = face_resized * mask_crop + ori_crop * (1.0 - mask_crop)
+            out_frame = ori_t.byte().cpu().numpy()
+        return np.ascontiguousarray(out_frame)
+    except Exception as exc:
+        print(f"[BLEND] Falling back to reference blender: {exc}", flush=True)
+        return _blend_reference(avatar, res_frame, idx)
 
 
 def _pack_frame(frame_idx: int, jpeg_bytes: bytes, pcm: np.ndarray) -> bytes:
@@ -362,7 +458,6 @@ def _pack_frame(frame_idx: int, jpeg_bytes: bytes, pcm: np.ndarray) -> bytes:
     pcm_f32 = pcm.astype(np.float32).tobytes()
     header  = struct.pack("<III", frame_idx, len(jpeg_bytes), len(pcm_f32) // 4)
     return header + jpeg_bytes + pcm_f32
-
 
 # ── Full offline inference (audio file → MP4 bytes) ───────────────────────────
 def _generate_video_sync(avatar, audio_path: str) -> bytes:
@@ -467,8 +562,9 @@ def _run_streaming_inference(
 
     Fixed pipeline parameters:
       Input audio  : 16 kHz float32 mono (client must resample before sending)
-      Output video : FPS=24 fps
+      Output video : STREAM_FPS fps
       Window size  : STREAM_CHUNK_FRAMES=24 frames = 16000 samples = 1 second
+      Hop size     : STREAM_HOP_FRAMES=6 frames = 4000 samples = 250 ms
 
     Packet format (binary):
       [uint32 frame_idx][uint32 jpeg_len][uint32 pcm_samples][jpeg][pcm_f32]
@@ -483,22 +579,27 @@ def _run_streaming_inference(
     def _get():
         return asyncio.run_coroutine_threadsafe(audio_q.get(), loop).result()
 
-    INPUT_SR      = 16000
-    spf           = INPUT_SR / FPS          # samples per video frame ≈ 666.67 @ 24 fps
-    chunk_samples = INPUT_SR               # 1 second = 16000 samples
+    INPUT_SR       = 16000
+    spf            = INPUT_SR / STREAM_FPS
+    window_frames  = STREAM_CHUNK_FRAMES
+    hop_frames     = STREAM_HOP_FRAMES
+    window_samples = INPUT_SR
+    hop_samples    = int(round(INPUT_SR * hop_frames / STREAM_FPS))
 
-    # Single accumulator at 16 kHz.  Never trimmed — absolute frame_idx
-    # indexing requires the full history from sample 0.
-    all_pcm   = np.array([], dtype=np.float32)
-    processed = 0       # 16 kHz samples consumed so far
-    frame_idx = 0       # global output frame counter
+    # Rolling 16 kHz buffer with absolute sample indexing so we can infer on
+    # overlapping windows without letting memory grow unbounded.
+    all_pcm             = np.array([], dtype=np.float32)
+    buffer_start_abs    = 0
+    next_window_end_abs = window_samples
+    frame_idx           = 0
+    emitted_any         = False
 
     # Latency tracking
     t_stream     = time.time()
     timing       = {"first_audio": None, "first_frame": None, "chunk_n": 0}
 
-    def _infer_window(window: np.ndarray):
-        """Whisper → PE → UNet → VAE decoder → blend → pack, for one 1-second window."""
+    def _infer_window(window: np.ndarray, emit_from_frame: int, delay_frame: int):
+        """Whisper → PE → UNet → VAE decoder → blend → pack for one window."""
         nonlocal frame_idx
         t0 = time.time()
 
@@ -507,7 +608,7 @@ def _run_streaming_inference(
         )
         whisper_chunks = audio_processor.get_whisper_chunk(
             feats, device, weight_dtype, whisper, lib_len,
-            fps=FPS,
+            fps=STREAM_FPS,
             audio_padding_length_left=AUDIO_PAD_L,
             audio_padding_length_right=AUDIO_PAD_R,
         )
@@ -515,15 +616,26 @@ def _run_streaming_inference(
         if n_frames == 0:
             return
 
+        emit_from_frame = max(0, min(emit_from_frame, n_frames))
+
+        # Only run PE/UNet/VAE for the new tail frames in overlapping windows.
+        frame_offset = emit_from_frame
+        active_chunks = whisper_chunks[frame_offset:]
+        active_frames = len(active_chunks)
+        if active_frames == 0:
+            return
+
         gen = datagen(
-            whisper_chunks, avatar.input_latent_list_cycle,
-            BATCH_SIZE, delay_frame=frame_idx,
+            active_chunks,
+            avatar.input_latent_list_cycle,
+            BATCH_SIZE,
+            delay_frame=max(0, delay_frame) + frame_offset,
         )
 
         local = 0
         with torch.no_grad():
             for wb, lb in gen:
-                if local >= n_frames:
+                if local >= active_frames:
                     break
                 af  = pe(wb.to(device))
                 lb  = lb.to(device=device, dtype=unet.model.dtype)
@@ -531,23 +643,25 @@ def _run_streaming_inference(
                 out = out.to(device=device, dtype=vae.vae.dtype)
 
                 for frame in vae.decode_latents(out):
-                    if local >= n_frames:
+                    if local >= active_frames:
                         break
+
                     combined = _blend(avatar, frame, frame_idx)
                     ok, jpeg = cv2.imencode(
-                        ".jpg", combined, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                        ".jpg", combined, [cv2.IMWRITE_JPEG_QUALITY, 72]
                     )
                     if not ok:
                         frame_idx += 1
-                        local     += 1
+                        local += 1
                         continue
 
-                    # Slice exactly 1/FPS seconds of 16 kHz audio for this frame
-                    a0  = int(round(frame_idx * spf))
-                    a1  = int(round((frame_idx + 1) * spf))
+                    # Slice audio from the frame's original position inside the full window.
+                    source_frame = frame_offset + local
+                    local_a0 = int(round(source_frame * spf))
+                    local_a1 = int(round((source_frame + 1) * spf))
                     pcm = (
-                        all_pcm[a0:a1].copy()
-                        if a1 <= len(all_pcm)
+                        window[local_a0:local_a1].copy()
+                        if local_a1 <= len(window)
                         else np.zeros(int(spf), dtype=np.float32)
                     )
                     if len(pcm) == 0:
@@ -568,9 +682,10 @@ def _run_streaming_inference(
 
         elapsed = time.time() - t0
         timing["chunk_n"] += 1
+        # Report the number of newly generated frames instead of the full overlap window.
         print(
-            f"[LATENCY] Chunk {timing['chunk_n']}: {n_frames} frames in "
-            f"{elapsed * 1000:.0f}ms  ({n_frames / elapsed:.1f} fps throughput)",
+            f"[LATENCY] Chunk {timing['chunk_n']}: emitted {active_frames}/{n_frames} frames in "
+            f"{elapsed * 1000:.0f}ms  ({active_frames / elapsed:.1f} fps throughput)",
             flush=True,
         )
 
@@ -592,18 +707,46 @@ def _run_streaming_inference(
             all_pcm = np.concatenate([all_pcm, chunk])
 
             # Process every complete 1-second window
-            while len(all_pcm) - processed >= chunk_samples:
-                window = all_pcm[processed: processed + chunk_samples]
-                _infer_window(window)
-                processed += chunk_samples
+            total_abs = buffer_start_abs + len(all_pcm)
 
-        # Flush any remaining audio — pad to full window so Whisper's
-        # zero-padding geometry guarantees actual_length ≥ 50 frames.
-        remaining = all_pcm[processed:]
-        if len(remaining) > 0:
-            if len(remaining) < chunk_samples:
-                remaining = np.pad(remaining, (0, chunk_samples - len(remaining)))
-            _infer_window(remaining)
+            # Infer on overlapping 1-second windows every 250 ms. The first
+            # window emits all 24 frames; subsequent windows emit only the new
+            # tail frames so audio/video arrive steadily instead of in big bursts.
+            while total_abs >= next_window_end_abs:
+                start_abs = next_window_end_abs - window_samples
+                start_idx = start_abs - buffer_start_abs
+                window = all_pcm[start_idx:start_idx + window_samples]
+
+                emit_from = 0 if not emitted_any else window_frames - hop_frames
+                delay_frame = frame_idx - emit_from
+                _infer_window(window, emit_from, delay_frame)
+
+                emitted_any = True
+                next_window_end_abs += hop_samples
+                total_abs = buffer_start_abs + len(all_pcm)
+
+            # Trim old samples we no longer need for the next overlapping window.
+            earliest_needed_abs = max(0, next_window_end_abs - window_samples)
+            trim = earliest_needed_abs - buffer_start_abs
+            if trim > 0:
+                all_pcm = all_pcm[trim:]
+                buffer_start_abs = earliest_needed_abs
+
+        # Flush the remaining tail at stream end. We keep as much left context
+        # as we have and emit only the frames that have not been sent yet.
+        total_abs = buffer_start_abs + len(all_pcm)
+        desired_total_frames = int(math.ceil(total_abs / spf)) if total_abs > 0 else 0
+        remaining_frames = max(0, desired_total_frames - frame_idx)
+        if remaining_frames > 0 and len(all_pcm) > 0:
+            if len(all_pcm) >= window_samples:
+                window = all_pcm[-window_samples:]
+                delay_frame = max(0, desired_total_frames - window_frames)
+            else:
+                window = np.pad(all_pcm, (window_samples - len(all_pcm), 0))
+                delay_frame = 0
+
+            emit_from = max(0, window_frames - remaining_frames)
+            _infer_window(window, emit_from, delay_frame)
 
     except Exception as exc:
         import traceback
@@ -684,8 +827,11 @@ async def ws_endpoint(websocket: WebSocket):
                         await _send_json({"type": "error", "detail": "No avatar_id."})
                     else:
                         try:
-                            await loop.run_in_executor(
+                            avatar = await loop.run_in_executor(
                                 _thread_pool, _load_avatar, avatar_id
+                            )
+                            await loop.run_in_executor(
+                                _thread_pool, _prepare_avatar_on_gpu, avatar
                             )
                             await _send_json({
                                 "type":      "avatar_loaded",
@@ -705,6 +851,9 @@ async def ws_endpoint(websocket: WebSocket):
                         avatar = await loop.run_in_executor(
                             _thread_pool, _load_avatar, avatar_id
                         )
+                        await loop.run_in_executor(
+                            _thread_pool, _prepare_avatar_on_gpu, avatar
+                        )
                     except Exception as exc:
                         await _send_json({"type": "error", "detail": str(exc)})
                         continue
@@ -723,7 +872,7 @@ async def ws_endpoint(websocket: WebSocket):
 
                     await _send_json({
                         "type":         "stream_meta",
-                        "fps":          FPS,
+                        "fps":          STREAM_FPS,
                         "sample_rate":  16000,  # fixed: pipeline always runs at 16 kHz
                         "total_frames": -1,     # unknown in streaming mode
                     })

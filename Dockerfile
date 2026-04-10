@@ -33,8 +33,8 @@ COPY . .
 # Create runtime directories
 RUN mkdir -p uploads results/avatars
 
-EXPOSE 7860
+EXPOSE 8000
 
 # models/ must be mounted as a volume (too large to bake in)
 # docker run ... -v /host/models:/app/models
-CMD ["uv", "run", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["uv", "run", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

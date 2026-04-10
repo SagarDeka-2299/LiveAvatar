@@ -3,7 +3,7 @@ services:
     build: .
     image: liveavatar:latest
     ports:
-      - "7860:7860"
+     - "3000:8000"
     volumes:
       # Model weights (~8.7 GB) — download once with download_weights.sh, then mount here
       - ./models:/app/models
@@ -20,8 +20,6 @@ services:
       - torch_compile_cache:/tmp/torchinductor_root
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
-      # Set to 1 to enable torch.compile (faster inference, but slow cold-start on first run
-      # until kernels are compiled and cached in the torch_compile_cache volume above).
       - TORCH_COMPILE=0
     deploy:
       resources:
@@ -32,7 +30,7 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
       timeout: 10s
       retries: 3
