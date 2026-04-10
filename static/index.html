@@ -559,10 +559,15 @@ function onMessage(ev) {
       fps             = msg.fps;
       totalFrames     = msg.total_frames;   // -1 means streaming / unknown
       streamingMode   = (totalFrames < 0);
+      if (audioCtx && audioCtx.state !== 'closed') {
+        audioCtx.close().catch(() => {});
+      }
       audioCtx        = new AudioContext({ sampleRate });
       frameBuffer     = {};
       nextFrameIdx    = 0;
       playStart       = 0;
+      nextAudioTime   = 0;
+      audioQueue      = [];
       playbackStarted = false;
       pendingFrames   = [];
       canvasSized     = false;
@@ -586,6 +591,7 @@ function onMessage(ev) {
       if (!playbackStarted && pendingFrames.length > 0) {
         beginPlayback();
       }
+      flushAudioQueue(true);
       if (streamingMode) {
         document.getElementById('progressFill').classList.remove('streaming');
         document.getElementById('progressFill').style.width = '100%';
@@ -631,11 +637,18 @@ let totalFrames     = 0;
 let streamingMode   = false;    // true when total_frames is unknown (-1)
 let frameBuffer     = {};       // frameIdx → ImageBitmap
 let pendingFrames   = [];       // accumulated before playback starts
+let audioQueue      = [];       // queued PCM slices waiting to be batched
 let playStart       = 0;        // audioCtx.currentTime when frame 0 plays
+let nextAudioTime   = 0;        // monotonic schedule cursor for audio chunks
 let playbackStarted = false;
 let canvasSized     = false;
 let rafId           = null;
-const PREBUFFER     = 24;       // frames to accumulate before auto-starting (= 1 full second @ 24 fps)
+let lastDrawnFrame  = -1;       // last frame index successfully drawn
+const PREBUFFER_SECONDS = 1.2;  // keep a little safety margin before playback starts
+const AUDIO_LEAD    = 0.12;     // leave headroom so browser scheduling stays smooth
+const AUDIO_FADE    = 0.0015;   // tiny de-click envelope per chunk
+const AUDIO_BATCH_FRAMES = 8;   // schedule ~333 ms at once instead of per-frame buffers
+const WS_BACKPRESSURE_BYTES = 1 << 20;
 
 const canvas = document.getElementById('canvas');
 const ctx2d  = canvas.getContext('2d');
@@ -646,18 +659,50 @@ function parseBinaryFrame(buf) {
   const jpegLen  = view.getUint32(4, true);
   const pcmCount = view.getUint32(8, true);
   const jpeg = new Uint8Array(buf, 12, jpegLen);
-  const pcm  = new Float32Array(buf, 12 + jpegLen, pcmCount);
+  const pcmOffset = 12 + jpegLen;
+  const pcmBytes = new Uint8Array(buf, pcmOffset, pcmCount * 4);
+  const pcm = new Float32Array(pcmCount);
+  new Uint8Array(pcm.buffer).set(pcmBytes);
   return { frameIdx, jpeg, pcm };
 }
 
-function scheduleAudioChunk(pcm, frameIdx) {
+function scheduleAudioBuffer(pcm) {
   const abuf = audioCtx.createBuffer(1, pcm.length, sampleRate);
-  abuf.getChannelData(0).set(pcm);
+  abuf.copyToChannel(pcm, 0);
   const src = audioCtx.createBufferSource();
   src.buffer = abuf;
-  src.connect(audioCtx.destination);
-  const t = playStart + frameIdx / fps;
-  src.start(Math.max(t, audioCtx.currentTime + 0.001));
+  const gain = audioCtx.createGain();
+  src.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  const duration = pcm.length / sampleRate;
+  const t = Math.max(nextAudioTime, audioCtx.currentTime + 0.01);
+  const fade = Math.min(AUDIO_FADE, duration / 4);
+
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(1, t + fade);
+  gain.gain.setValueAtTime(1, Math.max(t + fade, t + duration - fade));
+  gain.gain.linearRampToValueAtTime(0, t + duration);
+
+  src.start(t);
+  nextAudioTime = t + duration;
+}
+
+function flushAudioQueue(force=false) {
+  if (!audioCtx || audioQueue.length === 0) return;
+  while (audioQueue.length >= AUDIO_BATCH_FRAMES || (force && audioQueue.length > 0)) {
+    const batchCount = force ? audioQueue.length : AUDIO_BATCH_FRAMES;
+    const batch = audioQueue.splice(0, batchCount);
+    const totalSamples = batch.reduce((sum, item) => sum + item.pcm.length, 0);
+    const merged = new Float32Array(totalSamples);
+    let offset = 0;
+    for (const item of batch) {
+      merged.set(item.pcm, offset);
+      offset += item.pcm.length;
+    }
+    scheduleAudioBuffer(merged);
+    if (!force) return;
+  }
 }
 
 function decodeAndStore(jpeg, frameIdx) {
@@ -678,12 +723,17 @@ function drawFrame(bmp) {
 
 function beginPlayback() {
   playbackStarted = true;
-  playStart = audioCtx.currentTime + 0.05;
+  pendingFrames.sort((a, b) => a.frameIdx - b.frameIdx);
+  playStart = audioCtx.currentTime + AUDIO_LEAD;
+  nextAudioTime = playStart;
+  audioQueue = [];
+  lastDrawnFrame = -1;
 
   for (const f of pendingFrames) {
-    scheduleAudioChunk(f.pcm, f.frameIdx);
+    audioQueue.push({ frameIdx: f.frameIdx, pcm: f.pcm });
     decodeAndStore(f.jpeg, f.frameIdx);
   }
+  flushAudioQueue(true);
   pendingFrames = [];
 
   cancelAnimationFrame(rafId);
@@ -706,9 +756,10 @@ function handleBinaryFrame(buf) {
 
   if (!playbackStarted) {
     pendingFrames.push({ frameIdx, jpeg, pcm });
-    if (pendingFrames.length >= PREBUFFER) beginPlayback();
+    if (pendingFrames.length >= Math.max(8, Math.ceil(fps * PREBUFFER_SECONDS))) beginPlayback();
   } else {
-    scheduleAudioChunk(pcm, frameIdx);
+    audioQueue.push({ frameIdx, pcm });
+    flushAudioQueue(false);
     decodeAndStore(jpeg, frameIdx);
   }
 }
@@ -718,9 +769,19 @@ function renderLoop() {
   const elapsed = audioCtx.currentTime - playStart;
   if (elapsed >= 0) {
     const target = Math.floor(elapsed * fps);
-    if (frameBuffer[target]) {
-      drawFrame(frameBuffer[target]);
-      for (let j = target - 2; j >= 0; j--) {
+    let drawIdx = target;
+    if (!frameBuffer[drawIdx]) {
+      for (let j = target - 1; j > Math.max(lastDrawnFrame, target - 6); j--) {
+        if (frameBuffer[j]) {
+          drawIdx = j;
+          break;
+        }
+      }
+    }
+    if (frameBuffer[drawIdx]) {
+      drawFrame(frameBuffer[drawIdx]);
+      lastDrawnFrame = Math.max(lastDrawnFrame, drawIdx);
+      for (let j = lastDrawnFrame - 8; j >= 0; j--) {
         if (!frameBuffer[j]) break;
         frameBuffer[j].close?.();
         delete frameBuffer[j];
@@ -793,8 +854,11 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     pcm16k = rendered.getChannelData(0).slice();
   }
 
-  // 1 second of 16 kHz audio per chunk = 16000 samples
-  const CHUNK_SIZE = TARGET_SR;
+  // Send 250 ms chunks to reduce burstiness. The server still keeps a 1-second
+  // rolling inference window, but advancing it every 250 ms produces much smoother
+  // streaming than shipping one huge chunk per second.
+  const CHUNK_SIZE = TARGET_SR / 4;
+  const CHUNK_MS = (CHUNK_SIZE / TARGET_SR) * 1000;
 
   // Signal start of streaming session (pipeline is fixed at 16 kHz / 24 fps)
   ws.send(JSON.stringify({
@@ -805,12 +869,22 @@ document.getElementById('startBtn').addEventListener('click', async () => {
 
   setStreamStatus('Streaming audio…', 'info');
 
-  // Send 16 kHz PCM in 1-second Float32Array chunks
+  // Send 16 kHz PCM in 250 ms Float32Array chunks
+  let nextSendAt = performance.now();
   for (let offset = 0; offset < pcm16k.length; offset += CHUNK_SIZE) {
+    while (ws.bufferedAmount > WS_BACKPRESSURE_BYTES) {
+      await new Promise(r => setTimeout(r, 20));
+    }
+
     const chunk = pcm16k.slice(offset, offset + CHUNK_SIZE);
     ws.send(chunk.buffer);
-    // Yield to the event loop so the receive path (video frames) can run
-    await new Promise(r => setTimeout(r, 0));
+    nextSendAt += CHUNK_MS;
+    const delay = nextSendAt - performance.now();
+    if (delay > 1) {
+      await new Promise(r => setTimeout(r, delay));
+    } else {
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
 
   // Signal end of audio stream

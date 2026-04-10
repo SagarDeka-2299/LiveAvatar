@@ -53,31 +53,36 @@ def datagen(
     delay_frame=0,
     device="cuda:0",
 ):
-    whisper_batch, latent_batch = [], []
-    for i, w in enumerate(whisper_chunks):
-        idx = (i+delay_frame)%len(vae_encode_latents)
-        latent = vae_encode_latents[idx]
-        whisper_batch.append(w)
-        latent_batch.append(latent)
+    # Fast path: if vae_encode_latents is a pre-stacked [N, 8, 32, 32] tensor,
+    # a single index op replaces torch.cat over a list of [1,8,32,32] tensors.
+    is_tensor = isinstance(vae_encode_latents, torch.Tensor)
+    n = len(vae_encode_latents)
 
-        if len(latent_batch) >= batch_size:
-            whisper_batch = torch.stack(whisper_batch)
-            latent_batch = torch.cat(latent_batch, dim=0)
-            yield whisper_batch, latent_batch
-            whisper_batch, latent_batch  = [], []
+    whisper_batch, indices = [], []
+    for i, w in enumerate(whisper_chunks):
+        idx = (i + delay_frame) % n
+        whisper_batch.append(w)
+        indices.append(idx)
+
+        if len(indices) >= batch_size:
+            wb = torch.stack(whisper_batch)
+            lb = vae_encode_latents[indices] if is_tensor else torch.cat(
+                [vae_encode_latents[j] for j in indices], dim=0)
+            yield wb, lb
+            whisper_batch, indices = [], []
 
     # Pad the last (potentially partial) batch to batch_size so every yield has
     # the same shape.  Stable shapes are required for CUDA graph capture inside
     # torch.compile(mode="reduce-overhead").  Callers already guard with
     # `if local >= n_frames: break` so extra padded frames are never used.
-    if len(latent_batch) > 0:
-        while len(latent_batch) < batch_size:
+    if len(indices) > 0:
+        while len(indices) < batch_size:
             whisper_batch.append(whisper_batch[-1])
-            latent_batch.append(latent_batch[-1])
-        whisper_batch = torch.stack(whisper_batch)
-        latent_batch = torch.cat(latent_batch, dim=0)
-
-        yield whisper_batch.to(device), latent_batch.to(device)
+            indices.append(indices[-1])
+        wb = torch.stack(whisper_batch)
+        lb = vae_encode_latents[indices] if is_tensor else torch.cat(
+            [vae_encode_latents[j] for j in indices], dim=0)
+        yield wb.to(device), lb.to(device)
 
 def cast_training_params(
     model: Union[torch.nn.Module, List[torch.nn.Module]],
