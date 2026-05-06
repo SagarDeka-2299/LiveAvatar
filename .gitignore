@@ -1,0 +1,36 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# DB & uploads
+app.db
+app.db-journal
+*.sqlite
+*.sqlite3
+static/uploads/
+
+# Temp / OS
+temp/
+.DS_Store
+*.swp
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+dist/
+build/
+*.log

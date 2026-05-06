@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Lili Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.css"/>
+  <link rel="stylesheet" href="/static/styles.css?v=20260506b"/>
+  <style>
+    /* ── no right pane ── */
+    #right-pane,#right-resize-handle{display:none!important}
+    .app-shell{grid-template-columns:var(--left-w,260px) 4px 1fr!important;grid-template-areas:"left lh center"!important}
+
+    /* ── in-progress entity cards ── */
+    @keyframes eq-spin{to{transform:rotate(360deg)}}
+    .entity-spin{position:absolute;bottom:5px;right:5px;width:13px;height:13px;border:2px solid rgba(255,255,255,.1);border-top-color:#7c6af5;border-radius:50%;animation:eq-spin .65s linear infinite;pointer-events:none}
+    .entity-card--inprog{opacity:.78;cursor:default!important;pointer-events:none}
+    .entity-card--inprog .entity-delete-btn{pointer-events:all!important}
+    .entity-card--draft{border-color:rgba(245,158,11,.4)!important;background:rgba(245,158,11,.05)!important;cursor:default}
+    .entity-card--draft .entity-delete-btn{pointer-events:all!important}
+    .entity-stage{font-size:11px;margin-top:2px;color:var(--primary)}
+    .entity-stage.err{color:var(--red)}
+    .btn-retry-sm{font-size:11px;padding:3px 8px;border-radius:5px;border:1px solid rgba(255,255,255,.15);background:transparent;color:var(--dim);cursor:pointer;flex-shrink:0;white-space:nowrap;transition:border-color .15s,color .15s;margin-left:4px}
+    .btn-retry-sm:not([disabled]):hover{border-color:var(--primary);color:var(--primary)}
+    .btn-retry-sm[disabled]{opacity:.35;cursor:default}
+
+    /* ── Voice cards ── */
+    .voice-card{display:grid;grid-template-columns:40px 1fr auto;gap:8px;align-items:center;padding:8px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:border-color .18s,box-shadow .18s,background .18s;position:relative}
+    .voice-card:hover{border-color:var(--border-hover);background:var(--surface2)}
+    .voice-card.active{border-color:rgba(245,158,11,.72);background:rgba(245,158,11,.07);box-shadow:0 0 14px rgba(245,158,11,.25)}
+    .voice-thumb-icon{width:40px;height:54px;border-radius:7px;background:linear-gradient(135deg,#1a1035,#2d1b69);display:grid;place-items:center;font-size:18px;flex-shrink:0}
+    .voice-card-info{min-width:0}
+    .voice-card-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .voice-card-meta{font-size:11px;color:var(--muted);margin-top:2px}
+    .voice-source-pill{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.03em;margin-right:4px}
+    .voice-source-pill.designed{background:rgba(167,88,255,.15);color:#d6b8ff;border:1px solid rgba(167,88,255,.35)}
+    .voice-source-pill.cloned{background:rgba(34,197,94,.15);color:#a4e9b8;border:1px solid rgba(34,197,94,.35)}
+    .voice-play-btn{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);color:var(--amber);border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer;transition:all .15s;flex-shrink:0}
+    .voice-play-btn:hover{background:rgba(245,158,11,.25)}
+    .voice-card .entity-delete-btn{top:5px;right:5px}
+
+    /* ── Voice drop slot ── */
+    .voice-drop-slot{border:2px dashed var(--border);border-radius:8px;padding:10px 14px;min-height:44px;display:flex;align-items:center;gap:8px;cursor:default;transition:border-color .15s,background .15s}
+    .voice-drop-slot.drag-over{border-color:var(--primary);background:rgba(124,106,245,.08)}
+    .voice-drop-slot .drop-hint{color:var(--muted);font-size:0.82rem}
+    .voice-drop-slot .slot-thumb{width:28px;height:28px;border-radius:50%;object-fit:cover}
+
+    /* ── Voice preset chips ── */
+    .voice-preset-chip{padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:var(--dim);font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;user-select:none}
+    .voice-preset-chip:hover{border-color:rgba(245,158,11,.5);color:var(--amber);background:rgba(245,158,11,.07)}
+    .prompt-preview{margin-top:6px;padding:7px 10px;border-radius:6px;background:rgba(255,255,255,.04);border:1px solid var(--border);font-size:11px;color:var(--dim);line-height:1.6;word-break:break-word}
+    .avatar-preview-spin{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);backdrop-filter:blur(2px);border-radius:inherit;pointer-events:none}
+  </style>
+  <script src="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js" defer></script>
+  <script src="/static/app.js?v=20260506f" defer></script>
+</head>
+<body>
+<div class="app-shell" id="app-shell">
+
+  <!-- ══ LEFT PANE ══ -->
+  <aside class="left-pane" id="left-pane">
+    <div class="pane-toolbar">
+      <button class="pane-ctrl" id="left-pane-max" title="Maximize">⤢</button>
+      <button class="pane-ctrl" id="left-pane-close" title="Close (mobile)" style="display:none">✕</button>
+    </div>
+
+    <!-- Personas section -->
+    <section class="pane-section" id="personas-pane-section">
+      <div class="pane-section-header pane-section-header--clickable" id="personas-section-header">
+        <button class="section-collapse-btn" data-section="personas-pane-section" title="Collapse">▾</button>
+        <span class="pane-title">Personas</span>
+        <span id="persona-count-badge" class="badge badge-blue">0</span>
+        <span class="pane-action-hint">+ New</span>
+      </div>
+      <div class="section-body" id="personas-body">
+        <div id="left-persona-list" class="entity-list"><p class="pane-hint">No personas yet.</p></div>
+      </div>
+    </section>
+
+    <div class="section-resize-handle" id="sect-h-1" title="Drag to resize"></div>
+
+    <!-- Avatars section -->
+    <section class="pane-section" id="avatars-pane-section">
+      <div class="pane-section-header pane-section-header--clickable" id="avatars-section-header">
+        <button class="section-collapse-btn" data-section="avatars-pane-section" title="Collapse">▾</button>
+        <span class="pane-title">Avatars</span>
+        <span id="avatar-count-badge" class="badge badge-purple">0</span>
+        <span class="pane-action-hint">+ New</span>
+      </div>
+      <div class="section-body" id="avatars-body">
+        <p id="left-avatar-hint" class="pane-hint">Select a persona.</p>
+        <div id="left-avatar-list" class="entity-list"></div>
+      </div>
+    </section>
+
+    <div class="section-resize-handle" id="sect-h-2" title="Drag to resize"></div>
+
+    <!-- Voices section -->
+    <section class="pane-section" id="voices-pane-section">
+      <div class="pane-section-header pane-section-header--clickable" id="voices-section-header">
+        <button class="section-collapse-btn" data-section="voices-pane-section" title="Collapse">▾</button>
+        <span class="pane-title">Voices</span>
+        <span id="voice-count-badge" class="badge badge-amber">0</span>
+        <span class="pane-action-hint">+ New</span>
+      </div>
+      <div class="section-body" id="voices-body">
+        <div id="left-voice-list" class="entity-list"><p class="pane-hint">No voices yet.</p></div>
+      </div>
+    </section>
+
+    <div class="section-resize-handle" id="sect-h-3" title="Drag to resize"></div>
+
+    <!-- Contacts section -->
+    <section class="pane-section contacts-pane-section" id="contacts-pane-section">
+      <div class="pane-section-header">
+        <button class="section-collapse-btn" data-section="contacts-pane-section" title="Collapse">▾</button>
+        <span class="pane-title">Contacts</span>
+        <span id="contacts-count-badge" class="badge badge-cyan">0</span>
+      </div>
+      <div class="section-body" id="contacts-body">
+        <div id="left-contacts-list" class="entity-list contacts-list"><p class="pane-hint">No assistants yet.</p></div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- Left resize handle -->
+  <div class="pane-resize-handle" id="left-resize-handle"></div>
+
+  <!-- ══ CENTER ══ -->
+  <main class="middle-pane" id="middle-pane">
+
+    <!-- WELCOME -->
+    <div id="cv-welcome" class="center-view cv-active">
+      <div class="cv-welcome-state">
+        <div class="welcome-glyph">✦</div>
+        <h3>Lili Studio</h3>
+        <p>Select a section or item from the panel.</p>
+      </div>
+    </div>
+
+    <!-- NEW PERSONA -->
+    <div id="cv-new-persona" class="center-view" hidden>
+      <div class="cv-header">
+        <span class="cv-kicker">Personas</span>
+        <h2>New Persona</h2>
+      </div>
+      <div class="cv-body">
+        <input id="persona-image-input" class="hidden-file-input" type="file" accept="image/png,image/jpeg,image/webp"/>
+        <div id="persona-upload-zone" class="upload-zone">
+          <div class="upload-icon">⬆</div>
+          <p class="upload-primary">Drop image or <button id="pick-persona-image-btn" type="button" class="btn-inline">browse</button></p>
+          <p class="upload-hint">PNG · JPG · WEBP · Portrait preferred</p>
+        </div>
+        <div id="persona-preview-area" hidden>
+          <div class="preview-area">
+            <div class="preview-image-wrap">
+              <div id="persona-preview-thumb" class="preview-thumb portrait"></div>
+              <button id="edit-crop-btn" type="button" class="btn-overlay">✎ Crop</button>
+            </div>
+            <div class="preview-meta">
+              <div class="field"><label for="persona-name-input">Name</label>
+                <input id="persona-name-input" type="text" placeholder="e.g. Sophie" maxlength="100" value="Persona"/></div>
+              <div id="detected-gender-badge" class="detected-gender" hidden>
+                <span id="detected-gender-icon"></span><span id="detected-gender-label"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="persona-name-prearea">
+          <div class="field"><label for="persona-name-pre-input">Name</label>
+            <input id="persona-name-pre-input" type="text" placeholder="e.g. Sophie" maxlength="100" value="Persona"/></div>
+        </div>
+      </div>
+      <div class="cv-actions">
+        <button id="create-persona-btn" type="button" class="btn btn-primary btn-glow"><span class="btn-icon">✦</span> Create Persona</button>
+        <p id="persona-status" class="status-msg"></p>
+      </div>
+    </div>
+
+    <!-- PERSONA: Edit | Create Avatar -->
+    <div id="cv-persona" class="center-view" hidden>
+      <div class="cv-header">
+        <div class="cv-subject">
+          <div id="pv-thumb" class="cv-thumb portrait"></div>
+          <div><span class="cv-kicker">Persona</span><h2 id="pv-name"></h2><span id="pv-gender" class="cv-gender-pill"></span></div>
+        </div>
+      </div>
+      <div class="tab-bar" data-group="pv">
+        <button class="tab-btn active" data-tab="pv-edit">✎ Edit</button>
+        <button class="tab-btn" data-tab="pv-avatar">+ Avatar</button>
+      </div>
+      <div id="pv-edit" class="tab-pane active cv-body">
+        <div class="field"><label for="edit-persona-name">Name</label>
+          <input id="edit-persona-name" type="text" maxlength="100"/></div>
+        <!-- Voice assignment row -->
+        <div class="field">
+          <label>Voice <span class="field-note">Linked voice used by assistants</span></label>
+          <div id="pv-voice-info" style="padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:rgba(255,255,255,.02);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span id="pv-voice-badge-inline" class="voice-badge">Default</span>
+            <span id="pv-voice-meta-inline" class="voice-meta" style="flex:1;font-size:12px;color:var(--muted)">No custom voice</span>
+            <button type="button" id="pv-voice-play-btn" class="voice-play-btn btn-sm" hidden>▶</button>
+            <button type="button" id="pv-voice-unlink-btn" class="btn btn-ghost btn-sm" hidden>✕ Unlink</button>
+          </div>
+          <div id="pv-voice-drop-slot" class="voice-drop-slot" style="margin-top:8px">
+            <span class="drop-hint">Drag a voice here from the Voices panel</span>
+          </div>
+        </div>
+        <p id="edit-persona-status" class="status-msg"></p>
+      </div>
+
+      <div id="pv-avatar" class="tab-pane cv-body" hidden>
+        <div class="field"><label for="av-name-input">Avatar Name</label>
+          <input id="av-name-input" type="text" placeholder="e.g. Corporate Sophie" maxlength="100"/></div>
+        <div class="field"><label>Style Presets <span class="field-note">Select multiple</span></label>
+          <div id="pv-preset-cats" class="preset-categories"></div>
+          <div id="pv-preset-chips" class="preset-chips"></div>
+          <div id="av-prompt-preview" class="prompt-preview" hidden></div></div>
+        <div class="field"><label for="av-theme-input">Custom Prompt <span class="field-note">Optional</span></label>
+          <input id="av-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
+        <p id="av-status" class="status-msg"></p>
+      </div>
+      <div class="cv-actions">
+        <div id="pv-edit-actions">
+          <button id="save-persona-btn" type="button" class="btn btn-primary btn-glow">Save Changes</button>
+          <button id="delete-persona-from-edit-btn" type="button" class="btn btn-danger">🗑 Delete</button>
+        </div>
+        <div id="pv-avatar-actions" hidden>
+          <button id="av-generate-btn" type="button" class="btn btn-primary btn-glow"><span class="btn-icon">⚡</span> Generate</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AVATAR: Create Assistant | Clone -->
+    <div id="cv-avatar" class="center-view" hidden>
+      <div class="cv-header">
+        <div class="cv-subject">
+          <div id="avv-thumb" class="cv-thumb portrait"></div>
+          <div><span class="cv-kicker">Avatar</span><h2 id="avv-name"></h2><span id="avv-persona" class="cv-sub"></span></div>
+        </div>
+      </div>
+      <div id="avv-not-saved-block" class="cv-body" hidden>
+        <div class="avatar-preview-wrap">
+          <div class="avatar-preview-img-wrap">
+            <img id="avv-preview-img" class="avatar-preview-img" alt="Preview"/>
+            <div id="avv-preview-spin" class="avatar-preview-spin" hidden>
+              <div class="entity-spin" style="position:static;width:48px;height:48px;border-width:4px"></div>
+            </div>
+            <div id="avv-preview-label" class="avatar-preview-label" style="background:rgba(245,158,11,.85)">Not saved</div>
+          </div>
+        </div>
+        <p style="color:var(--muted);font-size:13px;margin-top:8px">This avatar exists only as a preview. Click <b>Save Avatar</b> to register it with Simli so it can power calls.</p>
+        <p id="avv-save-status" class="status-msg"></p>
+      </div>
+      <div class="tab-bar" data-group="avv">
+        <button class="tab-btn active" data-tab="avv-assistant">+ Assistant</button>
+        <button class="tab-btn" data-tab="avv-clone">⊕ Clone</button>
+      </div>
+      <div id="avv-assistant" class="tab-pane active cv-body">
+        <div class="field"><label for="asst-name-input">Name</label>
+          <input id="asst-name-input" type="text" placeholder="e.g. Sophie Assistant" maxlength="100" value="Assistant"/></div>
+        <div class="field"><label for="asst-prompt-input">Instructions</label>
+          <textarea id="asst-prompt-input">You are a warm, concise, helpful avatar assistant.</textarea></div>
+        <div class="field"><label for="asst-msg-input">Welcome Message</label>
+          <textarea id="asst-msg-input" style="min-height:70px">Hi, I am your avatar assistant. How can I help?</textarea></div>
+        <p id="asst-status" class="status-msg"></p>
+      </div>
+      <div id="avv-clone" class="tab-pane cv-body" hidden>
+        <div class="field"><label for="clone-av-name">New Name</label>
+          <input id="clone-av-name" type="text" placeholder="e.g. Casual Sophie" maxlength="100"/></div>
+        <div class="field"><label>Presets <span class="field-note">Pre-filled</span></label>
+          <div id="clone-preset-cats" class="preset-categories"></div>
+          <div id="clone-preset-chips" class="preset-chips"></div></div>
+        <div class="field"><label for="clone-av-theme">Theme Prompt</label>
+          <input id="clone-av-theme" type="text" maxlength="300"/></div>
+        <div id="clone-av-preview-area" class="avatar-preview-wrap" hidden>
+          <div class="avatar-preview-img-wrap">
+            <img id="clone-av-preview-img" class="avatar-preview-img" alt="Clone Preview"/>
+            <div class="avatar-preview-label">Clone Preview</div>
+          </div>
+        </div>
+        <p id="clone-av-status" class="status-msg"></p>
+      </div>
+      <div class="cv-actions">
+        <div id="avv-not-saved-actions" hidden>
+          <button id="avv-save-avatar-btn" type="button" class="btn btn-primary btn-glow"><span class="btn-icon">✦</span> Save Avatar</button>
+        </div>
+        <div id="avv-assistant-actions">
+          <button id="create-asst-btn" type="button" class="btn btn-primary btn-glow" style="background:linear-gradient(135deg,#0e8fa1,var(--cyan))"><span class="btn-icon">✦</span> Create Assistant</button>
+        </div>
+        <div id="avv-clone-actions" hidden>
+          <button id="clone-av-gen-btn" type="button" class="btn btn-secondary btn-glow-purple"><span class="btn-icon">⚡</span> Generate</button>
+          <button id="clone-av-regen-btn" type="button" class="btn btn-ghost">↺</button>
+          <button id="clone-av-save-btn" type="button" class="btn btn-primary btn-glow" hidden>✦ Save Clone</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ASSISTANT: Call | Clone -->
+    <div id="cv-assistant" class="center-view" hidden>
+      <div class="cv-header">
+        <div class="cv-subject">
+          <div id="ca-thumb" class="cv-thumb portrait"></div>
+          <div><span class="cv-kicker">Assistant</span><h2 id="ca-name"></h2><span id="ca-sub" class="cv-sub"></span></div>
+        </div>
+      </div>
+      <div class="tab-bar" data-group="ca">
+        <button class="tab-btn active" data-tab="ca-call">▶ Call</button>
+        <button class="tab-btn" data-tab="ca-clone">⊕ Clone</button>
+      </div>
+      <div id="ca-call" class="tab-pane active cv-body">
+        <div class="call-launch-area">
+          <div id="ca-call-thumb" class="call-launch-thumb"></div>
+          <h3 id="ca-call-name"></h3>
+          <p id="ca-call-sub" class="status-msg"></p>
+        </div>
+        <p id="ca-call-status" class="status-msg"></p>
+      </div>
+      <div id="ca-clone" class="tab-pane cv-body" hidden>
+        <div class="field"><label for="clone-asst-name">New Name</label>
+          <input id="clone-asst-name" type="text" maxlength="100"/></div>
+        <div class="field"><label for="clone-asst-prompt">Instructions</label>
+          <textarea id="clone-asst-prompt"></textarea></div>
+        <div class="field"><label for="clone-asst-msg">Welcome Message</label>
+          <textarea id="clone-asst-msg" style="min-height:70px"></textarea></div>
+        <p id="clone-asst-status" class="status-msg"></p>
+      </div>
+      <div class="cv-actions">
+        <div id="ca-call-actions">
+          <button id="launch-call-btn" type="button" class="btn btn-primary btn-glow" style="background:linear-gradient(135deg,#0e8fa1,var(--cyan));font-size:15px;padding:14px 32px">▶ Start Call</button>
+        </div>
+        <div id="ca-clone-actions" hidden>
+          <button id="clone-asst-btn" type="button" class="btn btn-primary btn-glow" style="background:linear-gradient(135deg,#0e8fa1,var(--cyan))"><span class="btn-icon">✦</span> Create Clone</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ VOICE DESIGN ══ -->
+    <div id="cv-voice-design" class="center-view" hidden>
+      <div class="cv-header">
+        <span class="cv-kicker">Voices</span>
+        <h2>Design Voice</h2>
+      </div>
+      <div class="tab-bar" data-group="vd">
+        <button class="tab-btn active" data-tab="vd-design">✨ AI Design</button>
+        <button class="tab-btn" data-tab="vd-clone">🎙 Clone</button>
+      </div>
+
+      <!-- AI Design tab -->
+      <div id="vd-design" class="tab-pane active cv-body">
+        <div class="field">
+          <label for="vd-name">Voice Name</label>
+          <input id="vd-name" type="text" placeholder="e.g. Sophie's Voice" maxlength="100"/>
+        </div>
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500">
+            <input type="checkbox" id="vd-include-persona" style="width:15px;height:15px;accent-color:var(--primary);flex-shrink:0;cursor:pointer"/>
+            Include persona voice profile
+            <span class="field-note">Appends persona's auto-generated voice traits to your description</span>
+          </label>
+          <div id="vd-persona-slot-wrap" hidden style="margin-top:8px">
+            <div id="vd-persona-drop-slot" class="voice-drop-slot">
+              <span class="drop-hint">Drag a persona from the Personas panel</span>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="vd-description">Voice Description <span class="field-note">Describe the voice characteristics</span></label>
+          <textarea id="vd-description" placeholder="e.g. warm, confident, professional female narrator with a clear neutral accent" style="min-height:80px"></textarea>
+        </div>
+        <div class="field">
+          <label>Quick Presets <span class="field-note">Click to apply</span></label>
+          <div id="vd-preset-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"></div>
+        </div>
+        <p id="vd-design-status" class="status-msg"></p>
+      </div>
+
+      <!-- Clone tab -->
+      <div id="vd-clone" class="tab-pane cv-body" hidden>
+        <div class="field">
+          <label for="vd-clone-name">Voice Name</label>
+          <input id="vd-clone-name" type="text" placeholder="e.g. My Cloned Voice" maxlength="100"/>
+        </div>
+        <div class="field">
+          <label for="vd-clone-sample">Voice Sample <span class="field-note">MP3 / WAV / M4A · 30 s–3 min · clean speech</span></label>
+          <input id="vd-clone-sample" type="file" accept="audio/*"/>
+          <p id="vd-clone-sample-name" class="field-note" style="margin-top:4px"></p>
+        </div>
+        <div id="vd-clone-original-area" hidden style="margin-top:8px">
+          <label style="font-size:11px;color:var(--muted)">Original sample (kept for reference)</label>
+          <audio id="vd-clone-original-audio" controls style="width:100%;margin-top:6px"></audio>
+        </div>
+        <p id="vd-clone-status" class="status-msg"></p>
+      </div>
+
+      <div class="cv-actions">
+        <div id="vd-design-actions">
+          <button id="vd-design-submit-btn" type="button" class="btn btn-primary btn-glow"><span class="btn-icon">✦</span> Create Voice</button>
+        </div>
+        <div id="vd-clone-actions" hidden>
+          <button id="vd-clone-submit-btn" type="button" class="btn btn-primary btn-glow"><span class="btn-icon">🎙</span> Clone Voice</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+</div><!-- /.app-shell -->
+
+<!-- Hidden audio for voice preview playback -->
+<audio id="voice-preview-audio" hidden></audio>
+
+<!-- Mobile toggles -->
+<div class="mobile-fab-strip">
+  <button class="mobile-pane-toggle" id="mob-left-btn">☰ Panel</button>
+  <button class="mobile-pane-toggle" id="mob-sync-btn">↺</button>
+</div>
+<div class="mobile-backdrop" id="mobile-backdrop"></div>
+
+<!-- DELETE MODAL -->
+<section id="delete-modal" class="modal" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-panel" style="max-width:380px">
+    <div class="modal-head"><div style="display:flex;align-items:center;gap:10px"><span style="font-size:22px">⚠</span><h3 id="delete-modal-title">Delete?</h3></div></div>
+    <div style="padding:16px 18px">
+      <p id="delete-modal-body" style="color:var(--dim);font-size:13px;line-height:1.6"></p>
+      <div id="delete-modal-cascade" style="margin-top:10px;padding:10px 12px;border-radius:var(--radius-sm);background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.2)" hidden>
+        <p id="delete-modal-cascade-text" style="font-size:12px;color:var(--red)"></p>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button id="delete-cancel-btn" type="button" class="btn btn-ghost">Keep It</button>
+      <button id="delete-confirm-btn" type="button" class="btn" style="background:var(--red);color:#fff">Delete</button>
+    </div>
+  </div>
+</section>
+
+<!-- CROPPER MODAL -->
+<section id="cropper-modal" class="modal" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-panel">
+    <div class="modal-head"><h3>Crop Portrait</h3><p>3:4 ratio — base for all avatars.</p></div>
+    <div class="modal-body"><img id="cropper-image" alt="Crop source"/></div>
+    <div class="modal-actions">
+      <button id="cancel-crop-btn" type="button" class="btn btn-ghost">Cancel</button>
+      <button id="confirm-crop-btn" type="button" class="btn btn-primary btn-glow">Use Crop</button>
+    </div>
+  </div>
+</section>
+
+<!-- CALL SHELL -->
+<section id="call-shell" class="call-shell" hidden>
+  <div class="call-topbar">
+    <div><p class="call-label">LIVE CALL</p><h3 id="call-title">Assistant</h3></div>
+    <div style="display:flex;gap:8px">
+      <button id="minimize-call-btn" type="button" class="btn btn-ghost btn-sm">⤓ Min</button>
+      <button id="hangup-call-btn" type="button" class="btn btn-danger btn-sm">✕ Hang Up</button>
+    </div>
+  </div>
+  <div id="call-widget-host" class="call-widget-host">
+    <video id="call-video" autoplay playsinline muted style="width:100%;height:100%;object-fit:contain;background:#000"></video>
+    <audio id="call-audio" autoplay></audio>
+    <div id="call-waiting" class="call-waiting">Connecting…</div>
+  </div>
+</section>
+
+<!-- FLOATING CALL -->
+<section id="floating-call" class="floating-call" hidden>
+  <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);padding:10px 12px">
+    <strong id="floating-call-title" style="font-size:13px">Assistant</strong>
+    <button id="restore-call-btn" type="button" class="btn btn-ghost btn-sm">⤢</button>
+  </div>
+  <div id="floating-widget-host" class="floating-widget-host"></div>
+  <div style="padding:10px 12px;border-top:1px solid var(--border)">
+    <button id="floating-hangup-btn" type="button" class="btn btn-danger btn-sm" style="width:100%">✕ Hang Up</button>
+  </div>
+</section>
+
+</body>
+</html>

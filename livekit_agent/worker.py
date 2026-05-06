@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+
+# Make the FastAPI app package importable when this file is run directly.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+load_dotenv()
+
+from app.config import settings  # noqa: E402
+from app.db import get_assistant  # noqa: E402
+
+AGENT_NAME = "lili-avatar-agent"
+
+logger = logging.getLogger("lili-avatar-agent")
+logging.basicConfig(level=logging.INFO)
+
+
+def _build_stt():
+    provider = settings.stt_provider
+    if provider == "deepgram":
+        from livekit.plugins import deepgram
+
+        return deepgram.STT(model=settings.stt_model, api_key=settings.deepgram_api_key or None)
+    if provider == "openai":
+        from livekit.plugins import openai
+
+        return openai.STT(model=settings.stt_model, api_key=settings.openai_api_key or None)
+    raise RuntimeError(f"Unsupported STT_PROVIDER: {provider}")
+
+
+def _build_llm(provider: str, model: str):
+    if provider == "openai":
+        from livekit.plugins import openai
+
+        return openai.LLM(model=model, api_key=settings.openai_api_key or None)
+    if provider == "gemini":
+        from livekit.plugins import google
+
+        return google.LLM(model=model, api_key=settings.gemini_api_key or None)
+    raise RuntimeError(f"Unsupported LLM provider: {provider}")
+
+
+_SUPPORTED_TTS = {"elevenlabs", "openai", "google"}
+
+
+def _build_tts(voice_id_override: str = "", provider_override: str = ""):
+    provider = (provider_override or settings.tts_provider).lower()
+    if provider not in _SUPPORTED_TTS:
+        logger.warning("Stored TTS provider %r is not supported — falling back to %s", provider, settings.tts_provider)
+        provider = settings.tts_provider.lower()
+        voice_id_override = ""  # stored voice_id is provider-specific; don't reuse
+    voice_id = voice_id_override or settings.tts_voice_id
+    return _make_tts(provider, settings.tts_model, voice_id)
+
+
+FALLBACK_ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"  # Sarah — present in every account
+
+
+def _make_tts(provider: str, model: str, voice_id: str):
+    if provider == "elevenlabs":
+        from livekit.plugins import elevenlabs
+
+        # Never rely on the plugin's hardcoded DEFAULT_VOICE_ID — it changes between
+        # plugin versions and the current default ("l7kNoIfnJKPg7779LI2t") is not
+        # available in standard accounts, which causes voice_id_does_not_exist errors.
+        effective_voice_id = voice_id or FALLBACK_ELEVENLABS_VOICE_ID
+        kwargs: dict = {
+            "model": model,
+            "api_key": settings.elevenlabs_api_key or None,
+            "voice_id": effective_voice_id,
+        }
+        return elevenlabs.TTS(**kwargs)
+    if provider == "openai":
+        from livekit.plugins import openai
+
+        return openai.TTS(model=model, voice=voice_id or "alloy", api_key=settings.openai_api_key or None)
+    if provider == "google":
+        from livekit.plugins import google
+
+        return google.TTS(api_key=settings.gemini_api_key or None)
+    raise RuntimeError(f"Unsupported TTS provider: {provider}")
+
+
+def _load_assistant_from_job(ctx: JobContext) -> dict | None:
+    meta_str = getattr(getattr(ctx, "job", None), "metadata", "") or ""
+    if not meta_str:
+        return None
+    try:
+        meta = json.loads(meta_str)
+    except Exception:
+        return None
+    aid = meta.get("assistant_id")
+    if not isinstance(aid, int):
+        try:
+            aid = int(aid)
+        except Exception:
+            return None
+    return get_assistant(aid)
+
+
+async def entrypoint(ctx: JobContext) -> None:
+    await ctx.connect()
+
+    assistant = _load_assistant_from_job(ctx)
+    if assistant:
+        face_id = str(assistant.get("face_id") or settings.default_simli_face_id or "")
+        instructions = str(assistant.get("prompt") or "You are a helpful avatar assistant.")
+        first_message = str(assistant.get("first_message") or "")
+        llm_provider = (str(assistant.get("llm_provider") or settings.llm_provider)).lower()
+        if llm_provider not in {"openai", "gemini"}:
+            llm_provider = settings.llm_provider
+        llm_model = str(assistant.get("llm_model") or "") or (
+            settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
+        )
+        voice_provider_override = (str(assistant.get("voice_provider") or "")).lower()
+        voice_id_override = str(assistant.get("voice_id") or "")
+    else:
+        face_id = settings.default_simli_face_id
+        instructions = os.getenv("AGENT_PERSONA_PROMPT", "You are a concise and friendly AI avatar assistant.")
+        first_message = ""
+        llm_provider = settings.llm_provider
+        llm_model = settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
+        voice_provider_override = ""
+        voice_id_override = ""
+
+    if not face_id:
+        raise RuntimeError("No face_id available (assistant row missing face_id and DEFAULT_SIMLI_FACE_ID unset)")
+
+    logger.info(
+        "Starting agent | room=%s assistant=%s llm=%s:%s stt=%s tts=%s voice=%s face=%s",
+        ctx.room.name,
+        (assistant or {}).get("name"),
+        llm_provider,
+        llm_model,
+        settings.stt_provider,
+        (voice_provider_override or settings.tts_provider),
+        voice_id_override or settings.tts_voice_id or "(default)",
+        face_id,
+    )
+
+    session = AgentSession(
+        stt=_build_stt(),
+        llm=_build_llm(llm_provider, llm_model),
+        tts=_build_tts(voice_id_override=voice_id_override, provider_override=voice_provider_override),
+    )
+
+    from livekit.plugins import simli
+
+    avatar = simli.AvatarSession(
+        simli_config=simli.SimliConfig(
+            api_key=settings.simli_api_key,
+            face_id=face_id,
+        )
+    )
+    await avatar.start(session, ctx.room)
+
+    await session.start(
+        agent=Agent(instructions=instructions),
+        room=ctx.room,
+    )
+
+    if first_message:
+        await session.say(first_message)
+
+
+if __name__ == "__main__":
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name=AGENT_NAME))

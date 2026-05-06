@@ -1,0 +1,37 @@
+services:
+  avatar-agent-flow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: avatar-agent-flow
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - AVATAR_DB_PATH=/data/app.db
+    volumes:
+      - avatar_agent_db:/data
+      - avatar_agent_uploads:/app/static/uploads
+    restart: unless-stopped
+
+  avatar-agent-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: avatar-agent-worker
+    command: ["uv", "run", "python", "livekit_agent/worker.py", "start"]
+    env_file:
+      - .env
+    environment:
+      - AVATAR_DB_PATH=/data/app.db
+    volumes:
+      - avatar_agent_db:/data
+      - avatar_agent_uploads:/app/static/uploads
+    depends_on:
+      - avatar-agent-flow
+    restart: unless-stopped
+
+volumes:
+  avatar_agent_db:
+  avatar_agent_uploads:
