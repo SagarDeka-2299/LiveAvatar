@@ -29,7 +29,7 @@ class Settings:
 
     # ── Task 2: avatar image edit ──
     image_provider: str = os.getenv("IMAGE_PROVIDER", "gemini").lower()
-    image_model_gemini: str = os.getenv("IMAGE_MODEL_GEMINI", "nano-banana-pro-preview")
+    image_model_gemini: str = os.getenv("IMAGE_MODEL_GEMINI", "gemini-3.1-flash-image-preview")
     image_model_openai: str = os.getenv("IMAGE_MODEL_OPENAI", "gpt-image-1.5")
 
     # ── Task 3: in-call LLM ──

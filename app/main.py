@@ -38,6 +38,7 @@ from app.db import (
     list_persona_avatars,
     list_persona_entities,
     list_voices,
+    update_assistant,
     update_persona_avatar,
     update_persona_entity,
     update_voice,
@@ -177,7 +178,10 @@ def on_startup() -> None:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 def normalize_image_path(image_path: str) -> str:
@@ -464,8 +468,16 @@ async def post_studio_avatar(
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not found")
 
+    # If saving a draft, use the draft's generated image (not the original persona photo)
+    draft_avatar = get_persona_avatar(draft_avatar_id) if draft_avatar_id else None
+    draft_image_path = str(draft_avatar["image_path"]) if draft_avatar and draft_avatar.get("image_path") else None
+    source_image_path = draft_image_path or str(persona["image_path"])
+
     await send_avatar_event(client_id, "avatar.requested", name=name, persona_id=persona_id)
-    image_bytes = read_persona_image_bytes(persona)
+    source_local = STATIC_DIR / source_image_path.removeprefix("/static/")
+    if not source_local.exists():
+        raise HTTPException(status_code=404, detail="Avatar source image file is missing")
+    image_bytes = source_local.read_bytes()
     await send_avatar_event(client_id, "api.uploading", name=name, persona_id=persona_id)
 
     try:
@@ -495,7 +507,7 @@ async def post_studio_avatar(
         update_persona_avatar(
             draft_avatar_id,
             face_id=face_id,
-            image_path=str(persona["image_path"]),
+            image_path=source_image_path,
             status=avatar_status,
             last_error=None,
         )
@@ -509,7 +521,7 @@ async def post_studio_avatar(
                 "theme_prompt": theme_prompt,
                 "preset_ids": json.dumps(parsed_preset_ids),
                 "face_id": face_id,
-                "image_path": str(persona["image_path"]),
+                "image_path": source_image_path,
                 "status": avatar_status,
                 "last_error": None,
             }
@@ -522,7 +534,7 @@ async def post_studio_avatar(
         theme_prompt=theme_prompt,
         preset_ids=parsed_preset_ids,
         face_id=face_id,
-        image_path=normalize_image_path(str(persona["image_path"])),
+        image_path=normalize_image_path(source_image_path),
         status=avatar_status,
         last_error=None,
     )
@@ -616,7 +628,8 @@ async def _run_avatar_image_generation(
             )
         else:
             edited_bytes = persona_image_bytes
-        preview_name = f"preview_{uuid4().hex}.png"
+        preview_ext = ".jpg" if edited_bytes.startswith(b"\xff\xd8\xff") else ".png"
+        preview_name = f"preview_{uuid4().hex}{preview_ext}"
         preview_path = UPLOADS_DIR / preview_name
         preview_path.write_bytes(edited_bytes)
         update_persona_avatar(
@@ -809,6 +822,23 @@ async def patch_studio_persona(persona_id: int, body: dict) -> PersonaEntity:
             })
     if fields:
         update_persona_entity(persona_id, **fields)
+        # Propagate voice changes to all assistants linked to this persona,
+        # otherwise calls keep using the assistant's stale voice_id.
+        if "voice_id" in fields:
+            new_voice_provider = fields.get("voice_provider") or settings.default_simli_voice_provider
+            new_voice_id = fields.get("voice_id") or (settings.default_simli_voice_id or "")
+            new_voice_model = (
+                settings.tts_model if new_voice_provider == "elevenlabs"
+                else settings.default_simli_voice_model
+            )
+            for asst in list_assistants():
+                if asst.get("persona_id") == persona_id:
+                    update_assistant(
+                        int(asst["id"]),
+                        voice_provider=new_voice_provider,
+                        voice_id=new_voice_id,
+                        voice_model=new_voice_model,
+                    )
     updated = get_persona_entity(persona_id)
     return _persona_to_model(updated, [])
 
@@ -1113,12 +1143,12 @@ async def _run_standalone_voice_design(
     client_id: str | None,
     persona_voice_description: str = "",
 ) -> None:
-    update_voice(voice_id, status="processing", last_error=None)
-    await _send_voice_entity_event(client_id, voice_id)
     try:
         description = user_description.strip()
         if persona_voice_description.strip():
             description = (description + ("; " if description else "") + persona_voice_description.strip())
+        update_voice(voice_id, status="processing", description=description, last_error=None)
+        await _send_voice_entity_event(client_id, voice_id)
         if len(description) < 20:
             raise RuntimeError("Voice description too short — please describe the voice in more detail.")
         if not settings.elevenlabs_api_key:
@@ -1215,7 +1245,20 @@ async def post_voice_design(
                 pass
             if include_persona_traits:
                 persona_voice_description = str(persona.get("voice_description") or "")
-    vid = insert_voice({"name": name or "New Voice", "source": "designed", "status": "processing", "persona_id": persona_id})
+    initial_description = description.strip()
+    if persona_voice_description.strip():
+        initial_description = (
+            initial_description
+            + ("; " if initial_description else "")
+            + persona_voice_description.strip()
+        )
+    vid = insert_voice({
+        "name": name or "New Voice",
+        "source": "designed",
+        "description": initial_description,
+        "status": "processing",
+        "persona_id": persona_id,
+    })
     asyncio.create_task(_run_standalone_voice_design(
         vid, user_description=description, image_bytes=image_bytes,
         voice_name=name, client_id=client_id,
@@ -1407,6 +1450,28 @@ async def retry_avatar(avatar_id: int, client_id: str | None = None) -> dict:
         raise HTTPException(status_code=404, detail="Avatar not found")
     if avatar["status"] not in {"failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="Avatar is not in a retryable state")
+
+    face_id = str(avatar.get("face_id") or "")
+    if not face_id:
+        persona_id = int(avatar["persona_id"])
+        persona = get_persona_entity(persona_id)
+        if not persona:
+            raise HTTPException(status_code=404, detail="Persona not found")
+        update_persona_avatar(avatar_id, status="generating", stage="image_generation", last_error=None)
+        asyncio.create_task(
+            _run_avatar_image_generation(
+                avatar_id=avatar_id,
+                persona_id=persona_id,
+                persona_image_bytes=read_persona_image_bytes(persona),
+                preset_ids=_parse_preset_ids(avatar.get("preset_ids")),
+                custom_prompt="",
+                name=str(avatar.get("name") or f"avatar-{avatar_id}"),
+                client_id=client_id,
+            )
+        )
+        await update_hub.broadcast({"event": "avatar.retrying", "avatar_id": avatar_id})
+        return {"status": "retrying"}
+
     update_persona_avatar(avatar_id, status="processing", stage="queued", last_error=None)
     asyncio.create_task(poll_avatar_until_ready(avatar_id, client_id))
     await update_hub.broadcast({"event": "avatar.retrying", "avatar_id": avatar_id})

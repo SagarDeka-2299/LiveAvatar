@@ -352,8 +352,8 @@ def list_voices() -> list[dict[str, Any]]:
     return _rows(f"SELECT {_VOICE_COLUMNS} FROM voices ORDER BY id DESC")
 
 
-def get_voice(voice_id: int) -> dict[str, Any] | None:
-    return _row(f"SELECT {_VOICE_COLUMNS} FROM voices WHERE id = ?", (voice_id,))
+def get_voice(row_id: int) -> dict[str, Any] | None:
+    return _row(f"SELECT {_VOICE_COLUMNS} FROM voices WHERE id = ?", (row_id,))
 
 
 def insert_voice(payload: dict[str, Any]) -> int:
@@ -377,8 +377,8 @@ def insert_voice(payload: dict[str, Any]) -> int:
     )
 
 
-def update_voice(voice_id: int, **fields: Any) -> None:
-    _update("voices", voice_id, **fields)
+def update_voice(row_id: int, **fields: Any) -> None:
+    _update("voices", row_id, **fields)
 
 
 def delete_voice_entity(voice_id: int) -> int:

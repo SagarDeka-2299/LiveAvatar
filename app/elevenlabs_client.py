@@ -59,19 +59,28 @@ async def create_voice_design_previews(
     if not api_key:
         raise ElevenLabsError("ELEVENLABS_API_KEY is missing")
 
-    payload = {"voice_description": voice_description, "text": text}
+    payload = {
+        "voice_description": voice_description,
+        "model_id": "eleven_ttv_v3",
+        "text": text,
+        "auto_generate_text": False,
+        "loudness": 0.5,
+        "guidance_scale": 5,
+        "should_enhance": True,
+    }
     headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
-            f"{ELEVENLABS_BASE_URL}/text-to-voice/create-previews",
+            f"{ELEVENLABS_BASE_URL}/text-to-voice/design",
             headers=headers,
             json=payload,
+            params={"output_format": "mp3_22050_32"},
         )
     data = _parse_json(response)
     _raise_for_status(response, data, action="voice design previews")
     previews = (data or {}).get("previews") or []
     if not previews:
-        raise ElevenLabsError(f"create-previews returned no previews: {data}")
+        raise ElevenLabsError(f"text-to-voice/design returned no previews: {data}")
     return previews
 
 
@@ -94,7 +103,7 @@ async def create_voice_from_preview(
     headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
-            f"{ELEVENLABS_BASE_URL}/text-to-voice/create-voice-from-preview",
+            f"{ELEVENLABS_BASE_URL}/text-to-voice",
             headers=headers,
             json=payload,
         )
@@ -102,7 +111,7 @@ async def create_voice_from_preview(
     _raise_for_status(response, data, action="commit voice from preview")
     voice_id = _dig(data, "voice_id")
     if not voice_id:
-        raise ElevenLabsError(f"create-voice-from-preview returned no voice_id: {data}")
+        raise ElevenLabsError(f"text-to-voice returned no voice_id: {data}")
     return str(voice_id)
 
 

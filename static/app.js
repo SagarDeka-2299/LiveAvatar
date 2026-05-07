@@ -1,6 +1,6 @@
 /* ── Constants ── */
 const PLACEHOLDER="/static/avatar-placeholder.svg";
-const CROP_W=768,CROP_H=1152,CROP_RATIO=2/3;
+const CROP_W=1024,CROP_H=576,CROP_RATIO=16/9;
 
 const PRESETS=[
   {id:"casual_outfit",  label:"Casual",        cat:"Outfit",      gender:"all",   prompt:"wearing casual modern streetwear"},
@@ -45,6 +45,8 @@ let pvPresets=[],pvPresetCat="All";
 let clonePresets=[],clonePresetCat="All";
 let pvDroppedVoiceId=null;
 let vdDroppedPersonaId=null;
+let navDroppedPersonaId=null,navPresets=[],navPresetCat="All";
+let naDroppedAvatarId=null;
 let vdCloneSampleFile=null;
 let libraryVoices=[];
 let _libExpanded=false;
@@ -102,13 +104,14 @@ const p2prompt=sel=>sel.map(id=>PRESETS.find(p=>p.id===id)?.prompt).filter(Boole
 function destroyCropper(){if(cropper){cropper.destroy();cropper=null;}}
 function openCropper(file){sourceFile=file;destroyCropper();revoke(sourceUrl);sourceUrl=URL.createObjectURL(file);
   $("cropper-image").src=sourceUrl;$("cropper-modal").hidden=false;
-  $("cropper-image").onload=()=>{cropper=new window.Cropper($("cropper-image"),{aspectRatio:CROP_RATIO,viewMode:1,dragMode:"move",autoCropArea:.9,cropBoxResizable:false,background:false,responsive:true});};
+  $("cropper-image").onload=()=>{cropper=new window.Cropper($("cropper-image"),{aspectRatio:CROP_RATIO,viewMode:1,dragMode:"move",autoCropArea:.9,cropBoxResizable:false,background:false,responsive:true,zoomable:true,wheelZoomRatio:0.1});};
 }
 function closeCropper(){$("cropper-modal").hidden=true;destroyCropper();}
 async function getCropped(){return new Promise((res,rej)=>{const c=cropper?.getCroppedCanvas({width:CROP_W,height:CROP_H,fillColor:"#fff"});if(!c)return rej(new Error("Cropper not ready"));c.toBlob(b=>b?res(b):rej(new Error("Crop failed")),"image/png",.95);});}
 function showPersonaPreview(blob){croppedBlob=blob;revoke(croppedUrl);croppedUrl=URL.createObjectURL(blob);
   setThumb($("persona-preview-thumb"),croppedUrl);
   $("persona-upload-zone").hidden=true;$("persona-name-prearea").hidden=true;$("persona-preview-area").hidden=false;
+  const cpb=$("create-persona-btn");if(cpb)cpb.disabled=false;
   const pre=$("persona-name-pre-input")?.value.trim();if(pre&&!$("persona-name-input").value.trim())$("persona-name-input").value=pre;
 }
 
@@ -213,6 +216,8 @@ function renderLeftAvatars(){
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("avatar",av.id,av.name);};card.appendChild(del);
       card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
+      card.draggable=true;
+      card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"avatar",id:av.id,name:av.name,image_path:av.image_path,persona_id:av.persona_id}));e.dataTransfer.effectAllowed="copy";});
     }else if(av.status==="processing"){
       card.className="entity-card entity-card--draft"+(av.id===selectedAvatarId?" active-purple":"");
       card.style.pointerEvents="auto";card.style.cursor="pointer";
@@ -236,16 +241,14 @@ function renderLeftAvatars(){
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("avatar",av.id,av.name);};
       card.append(thumb,info);
-      if(rl){
-        const rk=`avatar-${av.id}`;if(!_retryAt[rk])_setRetry(rk);
-        const secs=_retryLeft(rk);
-        const btn=document.createElement("button");btn.className="btn-retry-sm";btn.dataset.rk=rk;
-        btn.textContent=secs>0?`Retry in ${secs}s`:"↻ Retry";btn.disabled=secs>0;
-        btn.onclick=async()=>{btn.disabled=true;
-          try{await api(`/api/studio/avatars/${av.id}/retry?client_id=${clientId}`,{method:"POST"});await refreshAll();}
-          catch(e){if(isRateLimitError(e.message)){_setRetry(rk);_ensureTick();}btn.disabled=false;}};
-        card.appendChild(btn);_ensureTick();
-      }
+      const rk=`avatar-${av.id}`;if(rl&&!_retryAt[rk])_setRetry(rk);
+      const secs=_retryLeft(rk);
+      const btn=document.createElement("button");btn.className="btn-retry-sm";btn.dataset.rk=rk;
+      btn.textContent=secs>0?`Retry in ${secs}s`:"↻ Retry";btn.disabled=secs>0;
+      btn.onclick=async e=>{e.stopPropagation();btn.disabled=true;
+        try{await api(`/api/studio/avatars/${av.id}/retry?client_id=${clientId}`,{method:"POST"});await refreshAll();}
+        catch(e){if(isRateLimitError(e.message)){_setRetry(rk);_ensureTick();}else{alert("Retry failed: "+e.message);}btn.disabled=false;}};
+      card.appendChild(btn);if(rl)_ensureTick();
       card.appendChild(del);
     }
     list.appendChild(card);
@@ -316,7 +319,7 @@ function renderLeftVoices(){
   // ── ElevenLabs Library subsection ──
   if(libraryVoices.length){
     const hdr=document.createElement("div");
-    hdr.style.cssText="display:flex;align-items:center;gap:6px;padding:8px 4px 4px;cursor:pointer;user-select:none";
+    hdr.style.cssText="display:flex;align-items:center;gap:6px;padding:8px 4px 4px;cursor:pointer;user-select:none;grid-column:1/-1";
     hdr.innerHTML=`<span style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--muted);text-transform:uppercase">ElevenLabs Library</span><span style="font-size:10px;color:var(--muted)">(${libraryVoices.length})</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${_libExpanded?"▲":"▼"}</span>`;
     hdr.addEventListener("click",()=>{_libExpanded=!_libExpanded;renderLeftVoices();});
     list.appendChild(hdr);
@@ -363,7 +366,7 @@ function renderLeftContacts(){
 function renderAll(){renderLeftPersonas();renderLeftAvatars();renderLeftVoices();renderLeftContacts();}
 
 /* ── Center views ── */
-const ALL_VIEWS=["cv-welcome","cv-new-persona","cv-persona","cv-avatar","cv-assistant","cv-voice-design"];
+const ALL_VIEWS=["cv-welcome","cv-new-persona","cv-persona","cv-avatar","cv-assistant","cv-voice-design","cv-new-avatar","cv-new-assistant"];
 function showView(view){
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=true;});
   const target=$("cv-"+view);if(target)target.hidden=false;
@@ -372,6 +375,8 @@ function showView(view){
   else if(view==="avatar")initAvatarView();
   else if(view==="assistant")initAssistantView();
   else if(view==="voice-design")initVoiceDesignView();
+  else if(view==="new-avatar")initNewAvatarView();
+  else if(view==="new-assistant")initNewAssistantView();
   renderAll();
 }
 
@@ -387,6 +392,7 @@ document.addEventListener("click",e=>{
 /* ── New Persona ── */
 function initNewPersona(){
   $("persona-upload-zone").hidden=false;$("persona-name-prearea").hidden=false;$("persona-preview-area").hidden=true;
+  const cpb=$("create-persona-btn");if(cpb)cpb.disabled=true;
   setStatus($("persona-status"),"");
 }
 
@@ -427,6 +433,11 @@ function setupPvVoiceDropSlot(p){
   };
   // Update badge info row
   const badge=$("pv-voice-badge-inline"),meta=$("pv-voice-meta-inline"),playBtn=$("pv-voice-play-btn"),unlinkBtn=$("pv-voice-unlink-btn");
+  // Match by voice_ref_id first; fall back to matching by ElevenLabs voice_id
+  // (older personas created via AI-design path may not have voice_ref_id set).
+  const linkedVoice=p.voice_ref_id
+    ?voices.find(x=>x.id===p.voice_ref_id)
+    :(p.voice_id?voices.find(x=>x.voice_id===p.voice_id):null);
   if(badge){
     const src=p.voice_source||"",st=p.voice_status||"";
     if(st==="processing"){badge.textContent="Processing…";badge.className="voice-badge processing";}
@@ -434,8 +445,9 @@ function setupPvVoiceDropSlot(p){
     else if(src==="cloned"&&p.voice_id){badge.textContent="Cloned";badge.className="voice-badge cloned";}
     else{badge.textContent="Default";badge.className="voice-badge";}
   }
-  if(meta)meta.textContent=p.voice_id?`ElevenLabs · ${p.voice_id.slice(0,10)}…`:"No custom voice";
-  if(playBtn){playBtn.hidden=!p.voice_preview_path;playBtn.onclick=()=>{const audio=$("voice-preview-audio");if(audio&&p.voice_preview_path){audio.src=p.voice_preview_path;audio.play().catch(()=>{});}};}
+  if(meta)meta.textContent=linkedVoice?`ElevenLabs · ${linkedVoice.name}`:p.voice_id?`ElevenLabs · ${p.voice_id.slice(0,10)}…`:"No custom voice";
+  const previewUrl=linkedVoice?.preview_url||p.voice_preview_path||"";
+  if(playBtn){playBtn.hidden=!previewUrl;playBtn.onclick=()=>{const audio=$("voice-preview-audio");if(audio&&previewUrl){audio.src=previewUrl;audio.play().catch(()=>{});}};}
   if(unlinkBtn)unlinkBtn.hidden=!p.voice_id;
 }
 
@@ -642,6 +654,8 @@ $("confirm-crop-btn").addEventListener("click",async()=>{
   $("confirm-crop-btn").disabled=true;
   try{const b=await getCropped();showPersonaPreview(b);closeCropper();}catch(e){alert(e.message);}finally{$("confirm-crop-btn").disabled=false;}
 });
+$("crop-zoom-in").addEventListener("click",()=>cropper?.zoom(0.1));
+$("crop-zoom-out").addEventListener("click",()=>cropper?.zoom(-0.1));
 $("create-persona-btn").addEventListener("click",async()=>{
   const name=($("persona-name-input")?.value||$("persona-name-pre-input")?.value||"").trim();
   if(!name)return setStatus($("persona-status"),"Enter a name.","error");
@@ -720,6 +734,145 @@ $("av-generate-btn").addEventListener("click",async()=>{
   finally{btn.disabled=false;}
 });
 
+/* ── New Avatar view (standalone, with persona drop slot) ── */
+function renderNavPersonaSlot(){
+  const slot=$("nav-persona-drop-slot");if(!slot)return;
+  const btn=$("nav-generate-btn");
+  if(!navDroppedPersonaId){
+    slot.innerHTML='<span class="drop-hint">Drag a persona here from the Personas panel</span>';
+    if(btn)btn.disabled=true;return;
+  }
+  const p=studio.find(x=>x.id===navDroppedPersonaId);
+  if(!p){navDroppedPersonaId=null;return renderNavPersonaSlot();}
+  slot.innerHTML=`<img class="slot-thumb" src="${esc(p.image_path||PLACEHOLDER)}" alt=""/><b>${esc(p.name)}</b><span class="drop-hint" style="margin-left:auto">${esc(p.gender||"unknown")}</span>`;
+  if(btn)btn.disabled=false;
+}
+function renderNavPromptPreview(){
+  const el=$("nav-prompt-preview");if(!el)return;
+  const grouped={};
+  navPresets.forEach(id=>{const pr=PRESETS.find(x=>x.id===id);if(!pr)return;(grouped[pr.cat]=grouped[pr.cat]||[]).push(pr.prompt);});
+  const order=["Outfit","Hair","Facial Hair","Makeup","Accessories","Jewelry","Background"];
+  const labelMap={Outfit:"Clothing"};
+  const lines=[];
+  order.forEach(cat=>{if(grouped[cat]){const lbl=labelMap[cat]||cat;lines.push(`<b style="color:var(--muted)">${lbl}:</b> ${esc(grouped[cat].join(", "))}`);}});
+  if(lines.length){el.innerHTML=lines.join("<br>");el.hidden=false;}else{el.hidden=true;}
+}
+function renderNavPresets(){
+  const p=navDroppedPersonaId?studio.find(x=>x.id===navDroppedPersonaId):null;
+  const gender=p?.gender||"unknown";
+  renderPresetUI($("nav-preset-cats"),$("nav-preset-chips"),navPresets,navPresetCat,gender,
+    id=>{const i=navPresets.indexOf(id);i>=0?navPresets.splice(i,1):navPresets.push(id);renderNavPromptPreview();},
+    cat=>{navPresetCat=cat;renderNavPresets();});
+}
+function initNewAvatarView(){
+  if(selectedPersonaId&&!navDroppedPersonaId)navDroppedPersonaId=selectedPersonaId;
+  if(navDroppedPersonaId){const p=studio.find(x=>x.id===navDroppedPersonaId);if(!p)navDroppedPersonaId=null;}
+  renderNavPersonaSlot();
+  renderNavPresets();
+  renderNavPromptPreview();
+  setStatus($("nav-status"),"");
+  const slot=$("nav-persona-drop-slot");
+  slot.ondragover=e=>{e.preventDefault();slot.classList.add("drag-over");};
+  slot.ondragleave=()=>slot.classList.remove("drag-over");
+  slot.ondrop=e=>{
+    e.preventDefault();slot.classList.remove("drag-over");
+    try{const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");
+      if(d.type!=="persona"||!d.id)return;
+      navDroppedPersonaId=d.id;navPresets=[];navPresetCat="All";
+      renderNavPersonaSlot();renderNavPresets();renderNavPromptPreview();
+    }catch{}
+  };
+}
+$("nav-generate-btn").addEventListener("click",async()=>{
+  if(!navDroppedPersonaId){setStatus($("nav-status"),"Drop a persona onto the slot first.","error");return;}
+  const p=studio.find(x=>x.id===navDroppedPersonaId);if(!p)return;
+  const nameEl=$("nav-name-input");
+  const name=(nameEl?.value.trim())||p.name;
+  const customPrompt=$("nav-theme-input")?.value.trim()||"";
+  const btn=$("nav-generate-btn");btn.disabled=true;
+  setStatus($("nav-status"),"Queued — generating in background…","success");
+  try{
+    const fd=new FormData();
+    fd.append("persona_id",p.id);fd.append("name",name);
+    fd.append("preset_ids",JSON.stringify(navPresets));
+    fd.append("custom_prompt",customPrompt);
+    fd.append("client_id",clientId);
+    await api("/api/studio/avatars/preview",{method:"POST",body:fd});
+    navPresets=[];navPresetCat="All";if(nameEl)nameEl.value="";
+    const ti=$("nav-theme-input");if(ti)ti.value="";
+    renderNavPromptPreview();renderNavPresets();await refreshAll();
+  }catch(e){setStatus($("nav-status"),e.message,"error");}
+  finally{btn.disabled=false;}
+});
+
+/* ── New Assistant view (standalone, with avatar drop slot) ── */
+function renderNaAvatarSlot(){
+  const slot=$("na-avatar-drop-slot");if(!slot)return;
+  const btn=$("na-create-asst-btn");
+  if(!naDroppedAvatarId){
+    slot.innerHTML='<span class="drop-hint">Drag a ready avatar here from the Avatars panel</span>';
+    if(btn)btn.disabled=true;return;
+  }
+  let av=null,ownerPersona=null;
+  for(const p of studio){const found=(p.avatars||[]).find(a=>a.id===naDroppedAvatarId);if(found){av=found;ownerPersona=p;break;}}
+  if(!av){naDroppedAvatarId=null;return renderNaAvatarSlot();}
+  slot.innerHTML=`<img class="slot-thumb" src="${esc(av.image_path||PLACEHOLDER)}" alt=""/><b>${esc(av.name)}</b><span class="drop-hint" style="margin-left:auto">via ${esc(ownerPersona?.name||"")}</span>`;
+  if(btn)btn.disabled=false;
+}
+function initNewAssistantView(){
+  naDroppedAvatarId=null;
+  renderNaAvatarSlot();
+  setStatus($("na-asst-status"),"");
+  const slot=$("na-avatar-drop-slot");
+  slot.ondragover=e=>{e.preventDefault();slot.classList.add("drag-over");};
+  slot.ondragleave=()=>slot.classList.remove("drag-over");
+  slot.ondrop=e=>{
+    e.preventDefault();slot.classList.remove("drag-over");
+    try{const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");
+      if(d.type!=="avatar"||!d.id)return;
+      naDroppedAvatarId=d.id;renderNaAvatarSlot();
+    }catch{}
+  };
+}
+$("na-create-asst-btn").addEventListener("click",async()=>{
+  if(!naDroppedAvatarId){setStatus($("na-asst-status"),"Drop a ready avatar onto the slot first.","error");return;}
+  let av=null,ownerPersona=null;
+  for(const p of studio){const found=(p.avatars||[]).find(a=>a.id===naDroppedAvatarId);if(found){av=found;ownerPersona=p;break;}}
+  if(!av||!ownerPersona){setStatus($("na-asst-status"),"Avatar no longer available.","error");return;}
+  const name=$("na-asst-name")?.value.trim(),prompt=$("na-asst-prompt")?.value.trim(),fm=$("na-asst-msg")?.value.trim();
+  if(!name||!prompt){setStatus($("na-asst-status"),"Name and instructions required.","error");return;}
+  const btn=$("na-create-asst-btn");btn.disabled=true;setStatus($("na-asst-status"),"Creating…");
+  try{
+    const r=await api("/api/studio/assistants",{method:"POST",body:JSON.stringify({name,prompt,first_message:fm||"Hi!",persona_id:ownerPersona.id,avatar_id:av.id,client_id:clientId})});
+    setStatus($("na-asst-status"),`'${r.name}' created!`,"success");await refreshAll();
+  }catch(e){setStatus($("na-asst-status"),e.message,"error");}
+  finally{btn.disabled=false;}
+});
+
+/* ── Image lightbox ── */
+function openLightbox(src){if(!src)return;const m=$("image-lightbox"),img=$("lightbox-img");if(!m||!img)return;img.src=src;m.hidden=false;}
+function closeLightbox(){const m=$("image-lightbox");if(m)m.hidden=true;const img=$("lightbox-img");if(img)img.src="";}
+function _extractThumbSrc(el){
+  if(!el)return"";
+  if(el.tagName==="IMG")return el.src||"";
+  const bg=(el.style&&el.style.backgroundImage)||"";
+  const m=bg.match(/url\(["']?([^"')]+)["']?\)/);
+  return m?m[1]:"";
+}
+document.addEventListener("click",e=>{
+  const close=e.target.closest("#lightbox-close");
+  if(close){e.stopPropagation();closeLightbox();return;}
+  const onLightbox=e.target.closest("#image-lightbox");
+  if(onLightbox&&!e.target.closest("#lightbox-img")){closeLightbox();return;}
+  const thumb=e.target.closest(".entity-thumb,.cv-thumb,.avatar-preview-img,.slot-thumb");
+  if(!thumb)return;
+  const src=_extractThumbSrc(thumb);
+  if(!src||src.endsWith("/avatar-placeholder.svg"))return;
+  e.stopPropagation();
+  openLightbox(src);
+});
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){const m=$("image-lightbox");if(m&&!m.hidden)closeLightbox();}});
+
 /* ── Create Assistant ── */
 $("create-asst-btn").addEventListener("click",async()=>{
   const p=getPersona(),av=getAvatar();if(!p||!av)return;
@@ -762,8 +915,9 @@ $("clone-asst-btn").addEventListener("click",async()=>{
 
 /* ── Section header clicks ── */
 $("personas-section-header").addEventListener("click",e=>{if(e.target.closest(".section-collapse-btn"))return;selectedPersonaId=null;selectedAvatarId=null;showView("new-persona");});
-$("avatars-section-header").addEventListener("click",e=>{if(e.target.closest(".section-collapse-btn"))return;if(!selectedPersonaId)return;showView("persona");setTimeout(()=>document.querySelector('.tab-btn[data-tab="pv-avatar"]')?.click(),50);});
+$("avatars-section-header").addEventListener("click",e=>{if(e.target.closest(".section-collapse-btn"))return;showView("new-avatar");});
 $("voices-section-header").addEventListener("click",e=>{if(e.target.closest(".section-collapse-btn"))return;showView("voice-design");});
+$("contacts-section-header").addEventListener("click",e=>{if(e.target.closest(".section-collapse-btn"))return;showView("new-assistant");});
 
 /* ── Collapse sections ── */
 document.querySelectorAll(".section-collapse-btn").forEach(btn=>{
@@ -798,9 +952,9 @@ function initSectionResize(hId,prevId,nextId){
     document.addEventListener("mousemove",move);document.addEventListener("mouseup",up);
   });
 }
-initSectionResize("sect-h-1","personas-pane-section","avatars-pane-section");
-initSectionResize("sect-h-2","avatars-pane-section","voices-pane-section");
-initSectionResize("sect-h-3","voices-pane-section","contacts-pane-section");
+initSectionResize("sect-h-1","voices-pane-section","personas-pane-section");
+initSectionResize("sect-h-2","personas-pane-section","avatars-pane-section");
+initSectionResize("sect-h-3","avatars-pane-section","contacts-pane-section");
 
 /* ── Mobile ── */
 const backdrop=$("mobile-backdrop");
@@ -841,8 +995,11 @@ function setCallWaiting(show,msg){const el=$("call-waiting");if(!el)return;el.hi
 
 function attachTrack(pub){
   const track=pub.track;if(!track)return;
-  if(track.kind==="video"){track.attach($("call-video"));setCallWaiting(false);}
-  else if(track.kind==="audio"){track.attach($("call-audio"));}
+  const vid=$("call-video");
+  // Route both audio and video through the same <video> element so the browser
+  // keeps them on the same media clock — the only way to guarantee AV sync.
+  if(track.kind==="video"){track.attach(vid);setCallWaiting(false);}
+  else if(track.kind==="audio"){track.attach(vid);}
 }
 function detachTrack(pub){const t=pub.track;if(t)t.detach().forEach(el=>el.remove?.());}
 
@@ -902,7 +1059,6 @@ function hangup(){
   try{lkRoom?.disconnect();}catch{}
   lkRoom=null;
   const v=$("call-video");if(v){try{v.srcObject=null;}catch{}}
-  const a=$("call-audio");if(a){try{a.srcObject=null;}catch{}}
   setCallWaiting(true,"Connecting…");
   setCallMode("hidden");
 }
@@ -956,6 +1112,7 @@ window.addEventListener("DOMContentLoaded",async()=>{
   setCallMode("hidden");
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=(v!=="cv-welcome");});
   connectWS();
-  try{await refreshAll();}catch(e){console.error(e);}
+  try{await Promise.all([loadStudio(),loadAssistants(),loadVoices()]);}catch(e){console.error("Initial load error:",e);}
+  renderAll();
   loadLibraryVoices().then(()=>renderLeftVoices()).catch(()=>{});
 });

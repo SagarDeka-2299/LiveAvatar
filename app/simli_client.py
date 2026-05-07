@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import ssl
 from typing import Any
 
 import httpx
@@ -79,28 +81,36 @@ async def create_agent(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 async def upload_face_image(api_key: str, image_bytes: bytes, filename: str, face_name: str) -> dict[str, Any]:
     files = {"image": (filename, image_bytes)}
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
-            f"{SIMLI_BASE_URL}/faces/legacy",
-            headers={"x-simli-api-key": api_key},
-            params={"face_name": face_name},
-            files=files,
-        )
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"{SIMLI_BASE_URL}/faces/legacy",
+                    headers={"x-simli-api-key": api_key},
+                    params={"face_name": face_name},
+                    files=files,
+                )
 
-        if response.status_code == 404:
-            response = await client.post(
-                f"{SIMLI_BASE_URL}/generateFaceID",
-                headers={"api-key": api_key},
-                params={"face_name": face_name},
-                files=files,
-            )
+                if response.status_code == 404:
+                    response = await client.post(
+                        f"{SIMLI_BASE_URL}/generateFaceID",
+                        headers={"api-key": api_key},
+                        params={"face_name": face_name},
+                        files=files,
+                    )
 
-    payload = _parse_json_response(response)
-    if response.status_code >= 400:
-        raise SimliError(f"Simli face upload failed ({response.status_code}): {payload}")
-    if not isinstance(payload, dict):
-        return {"raw": payload}
-    return payload
+            payload = _parse_json_response(response)
+            if response.status_code >= 400:
+                raise SimliError(f"Simli face upload failed ({response.status_code}): {payload}")
+            if not isinstance(payload, dict):
+                return {"raw": payload}
+            return payload
+        except (ssl.SSLError, httpx.NetworkError, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            last_exc = exc
+            if attempt < 3:
+                await asyncio.sleep(2.0 * attempt)
+    raise SimliError(f"Simli face upload failed after 3 attempts: {last_exc}") from last_exc
 
 
 async def get_face_generation_status(api_key: str, face_id: str) -> dict[str, Any]:

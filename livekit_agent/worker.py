@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ if str(ROOT) not in sys.path:
 load_dotenv()
 
 from app.config import settings  # noqa: E402
-from app.db import get_assistant  # noqa: E402
+from app.db import get_assistant, get_persona_entity  # noqa: E402
 
 AGENT_NAME = "lili-avatar-agent"
 
@@ -122,8 +123,23 @@ async def entrypoint(ctx: JobContext) -> None:
         llm_model = str(assistant.get("llm_model") or "") or (
             settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
         )
-        voice_provider_override = (str(assistant.get("voice_provider") or "")).lower()
-        voice_id_override = str(assistant.get("voice_id") or "")
+        # Read voice from the persona as the authoritative source: assistants are
+        # created with a snapshot of the persona's voice, but the user can change
+        # the persona's voice afterwards. Reading from persona on each call
+        # guarantees fresh voice data even if assistant rows weren't propagated.
+        persona_row = None
+        pid = assistant.get("persona_id")
+        if pid:
+            try:
+                persona_row = get_persona_entity(int(pid))
+            except Exception:
+                persona_row = None
+        if persona_row and persona_row.get("voice_id"):
+            voice_provider_override = (str(persona_row.get("voice_provider") or "")).lower()
+            voice_id_override = str(persona_row.get("voice_id") or "")
+        else:
+            voice_provider_override = (str(assistant.get("voice_provider") or "")).lower()
+            voice_id_override = str(assistant.get("voice_id") or "")
     else:
         face_id = settings.default_simli_face_id
         instructions = os.getenv("AGENT_PERSONA_PROMPT", "You are a concise and friendly AI avatar assistant.")
@@ -156,13 +172,23 @@ async def entrypoint(ctx: JobContext) -> None:
 
     from livekit.plugins import simli
 
-    avatar = simli.AvatarSession(
-        simli_config=simli.SimliConfig(
-            api_key=settings.simli_api_key,
-            face_id=face_id,
+    _SIMLI_IDENTITY = "simli-avatar-agent"
+    for attempt in range(1, 4):
+        avatar = simli.AvatarSession(
+            simli_config=simli.SimliConfig(
+                api_key=settings.simli_api_key,
+                face_id=face_id,
+            )
         )
-    )
-    await avatar.start(session, ctx.room)
+        await avatar.start(session, ctx.room)
+        await asyncio.sleep(3)
+        if _SIMLI_IDENTITY in ctx.room.remote_participants:
+            break
+        if attempt < 3:
+            logger.warning("Simli avatar not connected (attempt %d/3), retrying in 5s…", attempt)
+            await asyncio.sleep(5)
+        else:
+            logger.error("Simli avatar failed to connect after 3 attempts, continuing voice-only")
 
     await session.start(
         agent=Agent(instructions=instructions),
