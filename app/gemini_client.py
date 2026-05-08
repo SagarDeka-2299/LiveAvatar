@@ -40,10 +40,10 @@ async def detect_gender_from_image(
                 "parts": [
                     {
                         "text": (
-                            "Classify the apparent adult presentation in the portrait for "
-                            "avatar styling. Return exactly one lowercase token: female, male, "
-                            "or unknown. If ambiguous or the subject is not clearly identifiable, "
-                            "return unknown."
+                            "You are a visual classifier for avatar customization. Examine the portrait "
+                            "and identify the apparent gender presentation of the adult subject. Reply "
+                            "with exactly one word — female, male, or unknown — and nothing else. "
+                            "Use unknown if the subject is ambiguous, not an adult, or not clearly visible."
                         ),
                     },
                     {"inline_data": {"mime_type": mime_type, "data": b64}},
@@ -87,15 +87,15 @@ async def describe_voice_from_image(
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     system_text = (
-        "You design voices for avatar assistants. Look at the portrait and suggest a voice that "
-        "matches the person's apparent age, gender, mood, and style. Return ONE paragraph (120 "
-        "to 350 characters) describing the voice in vivid but concrete terms: pitch, pace, timbre, "
-        "accent, warmth, energy. Use natural English prose — no bullet lists, no labels, no JSON. "
-        "If a user hint is provided, weave it in but never contradict the visual evidence."
+        "You are a voice casting director for AI avatar assistants. Your output will be sent directly "
+        "to ElevenLabs Voice Design to synthesize a unique voice. Given a portrait, write a 2–4 sentence "
+        "voice design brief that a voice synthesis engine can use directly. Cover: vocal register and pitch, "
+        "speaking pace and rhythm, tonal quality (warm/crisp/deep/breathy etc.), and any accent or regional "
+        "quality if evident. Write in plain English prose — no bullet points, no labels, no JSON. Be specific and vivid."
     )
-    user_text = "Describe the ideal voice for this person."
+    user_text = "Write a voice design brief for the person in this portrait."
     if user_prompt:
-        user_text += f"\n\nUser hint: {user_prompt.strip()}"
+        user_text += f"\n\nStyle direction from user: {user_prompt.strip()}"
 
     payload = {
         "contents": [

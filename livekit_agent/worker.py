@@ -25,6 +25,51 @@ AGENT_NAME = "lili-avatar-agent"
 logger = logging.getLogger("lili-avatar-agent")
 logging.basicConfig(level=logging.INFO)
 
+IDLE_WARN_SECONDS = 10   # silence before "Are you still there?"
+IDLE_BYE_SECONDS  = 5    # extra silence before goodbye + disconnect
+
+
+async def _idle_monitor(session: AgentSession, ctx: JobContext) -> None:
+    last_activity = asyncio.get_event_loop().time()
+    warned = False
+    warn_time = 0.0
+
+    def _on_user_input(ev: object) -> None:
+        nonlocal last_activity, warned, warn_time
+        if getattr(ev, "is_final", True):
+            last_activity = asyncio.get_event_loop().time()
+            warned = False
+            warn_time = 0.0
+
+    session.on("user_input_transcribed", _on_user_input)
+    try:
+        while True:
+            await asyncio.sleep(1)
+            now = asyncio.get_event_loop().time()
+            if not warned and (now - last_activity) >= IDLE_WARN_SECONDS:
+                warned = True
+                warn_time = now
+                await session.generate_reply(
+                    instructions=(
+                        "The user has been silent for a while. "
+                        "Briefly ask if they are still there in one short sentence. "
+                        "Use the same language as the conversation so far."
+                    )
+                )
+            elif warned and (now - warn_time) >= IDLE_BYE_SECONDS:
+                await session.generate_reply(
+                    instructions=(
+                        "The user has not responded. "
+                        "Say a warm, brief goodbye and let them know they can start a new call anytime. "
+                        "Use the same language as the conversation so far. One or two sentences only."
+                    )
+                )
+                await asyncio.sleep(3)
+                await ctx.room.disconnect()
+                return
+    except asyncio.CancelledError:
+        pass
+
 
 def _build_stt():
     provider = settings.stt_provider
@@ -115,7 +160,13 @@ async def entrypoint(ctx: JobContext) -> None:
     assistant = _load_assistant_from_job(ctx)
     if assistant:
         face_id = str(assistant.get("face_id") or settings.default_simli_face_id or "")
-        instructions = str(assistant.get("prompt") or "You are a helpful avatar assistant.")
+        instructions = str(assistant.get("prompt") or (
+            "You are a friendly, conversational AI avatar assistant in a live voice session. "
+            "Keep responses concise and natural — this is real-time spoken conversation, not a text chat. "
+            "Respond in 1–3 sentences unless a detailed answer is genuinely needed. "
+            "Be warm, clear, and direct. "
+            "Do not use bullet points, numbered lists, or markdown — speak in plain natural sentences."
+        ))
         first_message = str(assistant.get("first_message") or "")
         llm_provider = (str(assistant.get("llm_provider") or settings.llm_provider)).lower()
         if llm_provider not in {"openai", "gemini"}:
@@ -142,7 +193,14 @@ async def entrypoint(ctx: JobContext) -> None:
             voice_id_override = str(assistant.get("voice_id") or "")
     else:
         face_id = settings.default_simli_face_id
-        instructions = os.getenv("AGENT_PERSONA_PROMPT", "You are a concise and friendly AI avatar assistant.")
+        instructions = os.getenv(
+            "AGENT_PERSONA_PROMPT",
+            "You are a friendly, conversational AI avatar assistant in a live voice session. "
+            "Keep responses concise and natural — this is real-time spoken conversation, not a text chat. "
+            "Respond in 1–3 sentences unless a detailed answer is genuinely needed. "
+            "Be warm, clear, and direct. "
+            "Do not use bullet points, numbered lists, or markdown — speak in plain natural sentences.",
+        )
         first_message = ""
         llm_provider = settings.llm_provider
         llm_model = settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
@@ -197,6 +255,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     if first_message:
         await session.say(first_message)
+
+    asyncio.create_task(_idle_monitor(session, ctx))
 
 
 if __name__ == "__main__":

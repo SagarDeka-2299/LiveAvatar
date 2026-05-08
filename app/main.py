@@ -92,28 +92,86 @@ def _parse_preset_ids(raw: object) -> list[str]:
 
 
 AVATAR_PRESETS: dict[str, dict[str, str]] = {
-    "casual_outfit":  {"cat": "Outfit",      "prompt": "casual modern streetwear"},
-    "formal_suit":    {"cat": "Outfit",      "prompt": "a formal professional suit"},
-    "sporty_wear":    {"cat": "Outfit",      "prompt": "athletic sporty outfit"},
-    "elegant_dress":  {"cat": "Outfit",      "prompt": "an elegant sophisticated dress"},
-    "biz_blouse":     {"cat": "Outfit",      "prompt": "a professional business blouse"},
-    "biz_suit_m":     {"cat": "Outfit",      "prompt": "a sharp tailored business suit with tie"},
-    "leather_jkt":    {"cat": "Outfit",      "prompt": "a cool leather jacket"},
-    "glasses":        {"cat": "Accessories", "prompt": "fashionable eyeglasses"},
-    "watch_acc":      {"cat": "Accessories", "prompt": "a luxury wristwatch"},
-    "studio_bg":      {"cat": "Background",  "prompt": "a clean neutral studio background"},
-    "office_bg":      {"cat": "Background",  "prompt": "a modern corporate office background"},
-    "outdoor_bg":     {"cat": "Background",  "prompt": "a natural outdoor environment background"},
-    "red_lips":       {"cat": "Makeup",      "prompt": "vibrant red lipstick"},
-    "smoky_eyes":     {"cat": "Makeup",      "prompt": "dramatic smoky eye makeup"},
-    "natural_glow":   {"cat": "Makeup",      "prompt": "natural glowing skin with minimal makeup"},
-    "earrings":       {"cat": "Jewelry",     "prompt": "elegant drop earrings"},
-    "necklace":       {"cat": "Jewelry",     "prompt": "a delicate necklace"},
-    "updo_hair":      {"cat": "Hair",        "prompt": "an elegant updo hairstyle"},
-    "braids":         {"cat": "Hair",        "prompt": "beautifully braided hair"},
-    "beard_stubble":  {"cat": "Facial Hair", "prompt": "a short stylish beard stubble"},
-    "full_beard":     {"cat": "Facial Hair", "prompt": "a well-groomed full beard"},
-    "clean_shave":    {"cat": "Facial Hair", "prompt": "clean shaven smooth skin"},
+    # ── All genders ──
+    "casual_outfit":   {"cat": "Outfit",      "label": "Casual",          "gender": "all",    "prompt": "casual modern streetwear"},
+    "formal_suit":     {"cat": "Outfit",      "label": "Formal Suit",     "gender": "all",    "prompt": "a formal professional suit"},
+    "sporty_wear":     {"cat": "Outfit",      "label": "Sporty",          "gender": "all",    "prompt": "athletic sporty outfit"},
+    "glasses":         {"cat": "Accessories", "label": "Glasses",         "gender": "all",    "prompt": "fashionable eyeglasses"},
+    "studio_bg":       {"cat": "Background",  "label": "Studio BG",       "gender": "all",    "prompt": "a clean neutral studio background"},
+    "office_bg":       {"cat": "Background",  "label": "Office BG",       "gender": "all",    "prompt": "a modern corporate office background"},
+    "outdoor_bg":      {"cat": "Background",  "label": "Outdoor BG",      "gender": "all",    "prompt": "a natural outdoor environment background"},
+    "library_bg":      {"cat": "Background",  "label": "Library",         "gender": "all",    "prompt": "a warm bookshelf library background"},
+    "gym_bg":          {"cat": "Background",  "label": "Gym",             "gender": "all",    "prompt": "a modern gym or fitness studio background"},
+    "cityscape_bg":    {"cat": "Background",  "label": "Cityscape",       "gender": "all",    "prompt": "a blurred urban cityscape background"},
+    "medical_bg":      {"cat": "Background",  "label": "Medical Office",  "gender": "all",    "prompt": "a clean medical office or clinic background"},
+    "gradient_bg":     {"cat": "Background",  "label": "Gradient",        "gender": "all",    "prompt": "a smooth abstract gradient background"},
+    # ── Female ──
+    "elegant_dress":   {"cat": "Outfit",      "label": "Elegant Dress",   "gender": "female", "prompt": "an elegant sophisticated dress"},
+    "biz_blouse":      {"cat": "Outfit",      "label": "Biz Blouse",      "gender": "female", "prompt": "a professional business blouse"},
+    "blazer_f":        {"cat": "Outfit",      "label": "Blazer",          "gender": "female", "prompt": "a sharp tailored blazer"},
+    "turtleneck_f":    {"cat": "Outfit",      "label": "Turtleneck",      "gender": "female", "prompt": "a fitted turtleneck top"},
+    "lab_coat_f":      {"cat": "Outfit",      "label": "Lab Coat",        "gender": "female", "prompt": "a white lab coat over a blouse"},
+    "red_lips":        {"cat": "Makeup",      "label": "Red Lips",        "gender": "female", "prompt": "vibrant red lipstick"},
+    "smoky_eyes":      {"cat": "Makeup",      "label": "Smoky Eyes",      "gender": "female", "prompt": "dramatic smoky eye makeup"},
+    "natural_glow":    {"cat": "Makeup",      "label": "Natural Glow",    "gender": "female", "prompt": "natural glowing skin with minimal makeup"},
+    "bold_glam_f":     {"cat": "Makeup",      "label": "Bold Glam",       "gender": "female", "prompt": "bold glamorous full makeup with defined contouring"},
+    "no_makeup_f":     {"cat": "Makeup",      "label": "No Makeup",       "gender": "female", "prompt": "bare natural no-makeup clean skin look"},
+    "earrings":        {"cat": "Jewelry",     "label": "Earrings",        "gender": "female", "prompt": "elegant drop earrings"},
+    "necklace":        {"cat": "Jewelry",     "label": "Necklace",        "gender": "female", "prompt": "a delicate necklace"},
+    "bracelet_f":      {"cat": "Jewelry",     "label": "Bracelet",        "gender": "female", "prompt": "a delicate bracelet on the wrist"},
+    "updo_hair":       {"cat": "Hair",        "label": "Updo",            "gender": "female", "prompt": "an elegant updo hairstyle"},
+    "braids":          {"cat": "Hair",        "label": "Braids",          "gender": "female", "prompt": "beautifully braided hair"},
+    "long_flowing_f":  {"cat": "Hair",        "label": "Long Flowing",    "gender": "female", "prompt": "long flowing straight hair"},
+    "bob_cut_f":       {"cat": "Hair",        "label": "Bob Cut",         "gender": "female", "prompt": "a sleek chin-length bob cut"},
+    "ponytail_f":      {"cat": "Hair",        "label": "Ponytail",        "gender": "female", "prompt": "a neat high ponytail"},
+    "curly_natural_f": {"cat": "Hair",        "label": "Curly Natural",   "gender": "female", "prompt": "natural voluminous curly hair"},
+    "sunglasses_f":    {"cat": "Accessories", "label": "Sunglasses",      "gender": "female", "prompt": "stylish oversized sunglasses"},
+    # ── Male ──
+    "biz_suit_m":      {"cat": "Outfit",      "label": "Business Suit",   "gender": "male",   "prompt": "a sharp tailored business suit with tie"},
+    "leather_jkt":     {"cat": "Outfit",      "label": "Leather Jacket",  "gender": "male",   "prompt": "a cool leather jacket"},
+    "hoodie_m":        {"cat": "Outfit",      "label": "Hoodie",          "gender": "male",   "prompt": "a casual hoodie and jeans"},
+    "polo_smart_m":    {"cat": "Outfit",      "label": "Smart Casual",    "gender": "male",   "prompt": "a smart casual polo shirt"},
+    "tuxedo_m":        {"cat": "Outfit",      "label": "Tuxedo",          "gender": "male",   "prompt": "a black tie tuxedo"},
+    "lab_coat_m":      {"cat": "Outfit",      "label": "Lab Coat",        "gender": "male",   "prompt": "a white lab coat over a collared shirt"},
+    "watch_acc":       {"cat": "Accessories", "label": "Watch",           "gender": "male",   "prompt": "a luxury wristwatch"},
+    "cap_m":           {"cat": "Accessories", "label": "Cap",             "gender": "male",   "prompt": "a stylish baseball cap"},
+    "sunglasses_m":    {"cat": "Accessories", "label": "Sunglasses",      "gender": "male",   "prompt": "sleek stylish sunglasses"},
+    "beard_stubble":   {"cat": "Facial Hair", "label": "Stubble",         "gender": "male",   "prompt": "a short stylish beard stubble"},
+    "full_beard":      {"cat": "Facial Hair", "label": "Full Beard",      "gender": "male",   "prompt": "a well-groomed full beard"},
+    "clean_shave":     {"cat": "Facial Hair", "label": "Clean Shave",     "gender": "male",   "prompt": "clean shaven smooth skin"},
+    "slick_back_m":    {"cat": "Hair",        "label": "Slick Back",      "gender": "male",   "prompt": "slicked-back hair"},
+    "crew_cut_m":      {"cat": "Hair",        "label": "Crew Cut",        "gender": "male",   "prompt": "a short neat crew cut"},
+    "curly_natural_m": {"cat": "Hair",        "label": "Curly Natural",   "gender": "male",   "prompt": "natural curly hair"},
+}
+
+VOICE_PRESETS: dict[str, dict[str, str]] = {
+    # ── General ──
+    "warm_professional":  {"label": "Warm Professional",   "desc": "warm, confident, professional, clear diction, approachable"},
+    "energetic":          {"label": "Energetic",            "desc": "energetic, upbeat, enthusiastic, bright, youthful"},
+    "calm_soothing":      {"label": "Calm & Soothing",      "desc": "calm, gentle, soothing, soft, reassuring"},
+    "deep_authoritative": {"label": "Deep & Authoritative", "desc": "deep, resonant, authoritative, commanding, mature baritone"},
+    "bright_friendly":    {"label": "Bright & Friendly",    "desc": "bright, friendly, cheerful, light, welcoming, conversational"},
+    "news_anchor":        {"label": "News Anchor",           "desc": "crisp, neutral, clear diction, professional broadcaster, measured pace"},
+    "storyteller":        {"label": "Storyteller",           "desc": "expressive, dramatic, captivating storyteller, rich vocal range"},
+    "tech_presenter":     {"label": "Tech Presenter",        "desc": "clear, intelligent, modern, precise, confident, tech-savvy"},
+    # ── Male-coded ──
+    "deep_narrator_m":    {"label": "Deep Narrator",        "desc": "deep, rich baritone, slow deliberate pace, resonant, cinematic narrator"},
+    "friendly_sales_m":   {"label": "Friendly Sales",       "desc": "upbeat, persuasive, warm, enthusiastic, relatable, conversational"},
+    "calm_therapist_m":   {"label": "Calm Therapist",       "desc": "calm, measured, empathetic, gentle, thoughtful, non-judgmental"},
+    "wise_elder_m":       {"label": "Wise Elder",           "desc": "slow, thoughtful, warm, slightly gravelly, wise, seasoned storyteller"},
+    "exec_formal_m":      {"label": "Executive",            "desc": "formal, commanding, polished, composed, authoritative, boardroom tone"},
+    # ── Female-coded ──
+    "confident_leader_f": {"label": "Confident Leader",     "desc": "confident, direct, clear, inspiring, composed, professional female voice"},
+    "warm_teacher_f":     {"label": "Warm Teacher",         "desc": "patient, warm, encouraging, clear articulation, nurturing, approachable"},
+    "fitness_coach_f":    {"label": "Fitness Coach",        "desc": "energetic, motivating, upbeat, strong, positive, high-energy female voice"},
+    "meditation_guide_f": {"label": "Meditation Guide",     "desc": "soft, slow, breathy, deeply soothing, calming, mindfulness guide tone"},
+    "customer_service_f": {"label": "Customer Service",     "desc": "helpful, friendly, patient, cheerful, clear, polite service representative"},
+    # ── Industry / Use-case ──
+    "healthcare_pro":     {"label": "Healthcare",           "desc": "calm, precise, reassuring, clinical, professional, clear medical tone"},
+    "legal_formal":       {"label": "Legal",                "desc": "formal, measured, authoritative, precise diction, serious, trustworthy"},
+    "finance_trust":      {"label": "Finance",              "desc": "confident, composed, trustworthy, professional, measured, credible"},
+    "edu_engaging":       {"label": "Educator",             "desc": "clear, patient, engaging, articulate, encouraging, instructional tone"},
+    "ai_assistant":       {"label": "AI Assistant",         "desc": "neutral, clear, helpful, modern, conversational, natural synthetic voice"},
 }
 
 PRESET_CATEGORY_LABEL = {
@@ -149,14 +207,20 @@ def build_avatar_edit_prompt(preset_ids: list[str], custom_prompt: str = "") -> 
         return ""
 
     body = "\n".join(sections)
+    has_background = "Background" in grouped
     return (
-        "Edit the provided portrait. CRITICAL: keep the face, identity, age, "
-        "ethnicity, skin tone and bone structure of the person EXACTLY identical "
-        "to the source image. Do not alter face shape, eyes, nose, mouth, "
-        "expression, or proportions. Only modify the elements listed below.\n\n"
-        f"Apply these changes:\n{body}\n\n"
-        "Maintain photorealistic quality, natural lighting, and the original "
-        "portrait framing and aspect ratio."
+        "Edit the provided portrait with precision.\n\n"
+        "IDENTITY LOCK — the following must remain absolutely identical to the source image:\n"
+        "- Face shape, eyes, nose, mouth, chin, ears, and expression\n"
+        "- Skin tone, complexion, and texture\n"
+        "- Age appearance, bone structure, and facial proportions\n"
+        "- Ethnic and cultural presentation\n"
+        + ("" if has_background else "- Background and environment (preserve unchanged)\n")
+        + "\nOnly apply the changes listed below. Everything else stays identical.\n\n"
+        f"Changes to apply:\n{body}\n\n"
+        "- Photorealistic output only — no illustration, painting, or cartoon style\n"
+        "- Maintain natural lighting consistent with the source\n"
+        "- Keep the original portrait framing and aspect ratio"
     )
 
 app.add_middleware(
@@ -343,6 +407,16 @@ def read_persona_image_bytes(persona: dict[str, object]) -> bytes:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/studio/presets")
+def get_studio_presets() -> dict:
+    avatar_presets = [
+        {"id": pid, "label": meta["label"], "cat": meta["cat"], "gender": meta["gender"]}
+        for pid, meta in AVATAR_PRESETS.items()
+    ]
+    voice_presets = [{"id": pid, "label": meta["label"]} for pid, meta in VOICE_PRESETS.items()]
+    return {"avatar_presets": avatar_presets, "voice_presets": voice_presets}
 
 
 @app.get("/api/config")
@@ -863,8 +937,9 @@ async def delete_studio_persona(persona_id: int) -> dict:
 # ── Voice customization ─────────────────────────────────────────────────────────
 
 VOICE_PREVIEW_TEXT = (
-    "Hello! I am your new avatar assistant. I am excited to chat with you today. "
-    "Let me know how I can help, and we can take it from there."
+    "Hello there! I'm your AI avatar assistant — great to meet you. "
+    "I'm here to help with questions, conversations, or whatever you need. "
+    "Just let me know where you'd like to start. What can I do for you today?"
 )
 
 
@@ -1230,10 +1305,16 @@ async def _run_standalone_voice_clone(
 async def post_voice_design(
     name: str = Form(...),
     description: str = Form(default=""),
+    voice_preset_id: str | None = Form(default=None),
     persona_id: int | None = Form(default=None),
     include_persona_traits: bool = Form(default=False),
     client_id: str | None = Form(default=None),
 ) -> VoiceEntity:
+    if voice_preset_id:
+        preset = VOICE_PRESETS.get(voice_preset_id)
+        if not preset:
+            raise HTTPException(status_code=400, detail=f"Unknown voice preset: {voice_preset_id}")
+        description = preset["desc"]
     image_bytes: bytes | None = None
     persona_voice_description = ""
     if persona_id:

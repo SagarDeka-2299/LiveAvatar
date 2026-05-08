@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.css"/>
-  <link rel="stylesheet" href="/static/styles.css?v=20260506d"/>
+  <link rel="stylesheet" href="/static/styles.css?v=20260508a"/>
   <style>
     /* ── no right pane ── */
     #right-pane,#right-resize-handle{display:none!important}
@@ -58,12 +58,14 @@
     /* ── Voice preset chips ── */
     .voice-preset-chip{padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:var(--dim);font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;user-select:none}
     .voice-preset-chip:hover{border-color:rgba(245,158,11,.5);color:var(--amber);background:rgba(245,158,11,.07)}
+    .voice-preset-chip.selected{border-color:var(--secondary);background:rgba(168,85,247,.14);color:var(--secondary);box-shadow:0 0 8px rgba(168,85,247,.25)}
+    textarea.preset-locked{opacity:.55;cursor:not-allowed;border-color:var(--secondary);background:rgba(168,85,247,.06)}
     .prompt-preview{margin-top:6px;padding:7px 10px;border-radius:6px;background:rgba(255,255,255,.04);border:1px solid var(--border);font-size:11px;color:var(--dim);line-height:1.6;word-break:break-word}
     .avatar-preview-spin{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);backdrop-filter:blur(2px);border-radius:inherit;pointer-events:none}
   </style>
   <script src="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js" defer></script>
-  <script src="/static/app.js?v=20260507a" defer></script>
+  <script src="/static/app.js?v=20260508a" defer></script>
 </head>
 <body>
 <div class="app-shell" id="app-shell">
@@ -431,9 +433,10 @@
         <div class="field">
           <label for="vd-description">Voice Description <span class="field-note">Describe the voice characteristics</span></label>
           <textarea id="vd-description" placeholder="e.g. warm, confident, professional female narrator with a clear neutral accent" style="min-height:80px"></textarea>
+          <div id="vd-preset-indicator" hidden style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:var(--secondary);font-weight:500"></div>
         </div>
         <div class="field">
-          <label>Quick Presets <span class="field-note">Click to apply</span></label>
+          <label>Quick Presets <span class="field-note">Click to apply — type in the field above to use custom</span></label>
           <div id="vd-preset-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"></div>
         </div>
         <p id="vd-design-status" class="status-msg"></p>

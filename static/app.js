@@ -2,45 +2,13 @@
 const PLACEHOLDER="/static/avatar-placeholder.svg";
 const CROP_W=1024,CROP_H=576,CROP_RATIO=16/9;
 
-const PRESETS=[
-  {id:"casual_outfit",  label:"Casual",        cat:"Outfit",      gender:"all",   prompt:"wearing casual modern streetwear"},
-  {id:"formal_suit",    label:"Formal Suit",   cat:"Outfit",      gender:"all",   prompt:"wearing a formal professional suit"},
-  {id:"sporty_wear",    label:"Sporty",        cat:"Outfit",      gender:"all",   prompt:"wearing athletic sporty outfit"},
-  {id:"glasses",        label:"Glasses",       cat:"Accessories", gender:"all",   prompt:"with fashionable eyeglasses"},
-  {id:"studio_bg",      label:"Studio BG",     cat:"Background",  gender:"all",   prompt:"with clean neutral studio background"},
-  {id:"office_bg",      label:"Office BG",     cat:"Background",  gender:"all",   prompt:"with modern corporate office background"},
-  {id:"outdoor_bg",     label:"Outdoor BG",    cat:"Background",  gender:"all",   prompt:"with natural outdoor environment background"},
-  {id:"elegant_dress",  label:"Elegant Dress", cat:"Outfit",      gender:"female",prompt:"wearing an elegant sophisticated dress"},
-  {id:"biz_blouse",     label:"Biz Blouse",    cat:"Outfit",      gender:"female",prompt:"wearing a professional business blouse"},
-  {id:"red_lips",       label:"Red Lips",      cat:"Makeup",      gender:"female",prompt:"with vibrant red lipstick"},
-  {id:"smoky_eyes",     label:"Smoky Eyes",    cat:"Makeup",      gender:"female",prompt:"with dramatic smoky eye makeup"},
-  {id:"natural_glow",   label:"Natural Glow",  cat:"Makeup",      gender:"female",prompt:"with natural glowing skin minimal makeup"},
-  {id:"earrings",       label:"Earrings",      cat:"Jewelry",     gender:"female",prompt:"wearing elegant drop earrings"},
-  {id:"necklace",       label:"Necklace",      cat:"Jewelry",     gender:"female",prompt:"wearing a delicate necklace"},
-  {id:"updo_hair",      label:"Updo",          cat:"Hair",        gender:"female",prompt:"with an elegant updo hairstyle"},
-  {id:"braids",         label:"Braids",        cat:"Hair",        gender:"female",prompt:"with beautifully braided hair"},
-  {id:"biz_suit_m",     label:"Business Suit", cat:"Outfit",      gender:"male",  prompt:"wearing a sharp tailored business suit with tie"},
-  {id:"leather_jkt",    label:"Leather Jacket",cat:"Outfit",      gender:"male",  prompt:"wearing a cool leather jacket"},
-  {id:"beard_stubble",  label:"Stubble",       cat:"Facial Hair", gender:"male",  prompt:"with a short stylish beard stubble"},
-  {id:"full_beard",     label:"Full Beard",    cat:"Facial Hair", gender:"male",  prompt:"with a well-groomed full beard"},
-  {id:"clean_shave",    label:"Clean Shave",   cat:"Facial Hair", gender:"male",  prompt:"clean shaven with smooth skin"},
-  {id:"watch_acc",      label:"Watch",         cat:"Accessories", gender:"male",  prompt:"wearing a luxury wristwatch"},
-];
-
-const VOICE_PRESETS=[
-  {id:"warm_professional", label:"Warm Professional", desc:"warm, confident, professional, clear diction, approachable"},
-  {id:"energetic",         label:"Energetic",          desc:"energetic, upbeat, enthusiastic, bright, youthful"},
-  {id:"calm_soothing",     label:"Calm & Soothing",    desc:"calm, gentle, soothing, soft, reassuring"},
-  {id:"deep_authoritative",label:"Deep & Authoritative",desc:"deep, resonant, authoritative, commanding, mature baritone"},
-  {id:"bright_friendly",   label:"Bright & Friendly",  desc:"bright, friendly, cheerful, light, welcoming, conversational"},
-  {id:"news_anchor",       label:"News Anchor",         desc:"crisp, neutral, clear diction, professional broadcaster, measured pace"},
-  {id:"storyteller",       label:"Storyteller",         desc:"expressive, dramatic, captivating storyteller, rich vocal range"},
-  {id:"tech_presenter",    label:"Tech Presenter",      desc:"clear, intelligent, modern, precise, confident, tech-savvy"},
-];
+let PRESETS=[];
+let VOICE_PRESETS=[];
 
 /* ── State ── */
 let studio=[],assistants=[],voices=[];
 let selectedPersonaId=null,selectedAvatarId=null,selectedAssistantId=null,selectedVoiceId=null;
+let vdSelectedPresetId=null;
 let pvPresets=[],pvPresetCat="All";
 let clonePresets=[],clonePresetCat="All";
 let pvDroppedVoiceId=null;
@@ -95,10 +63,10 @@ function renderPresetUI(catsEl,chipsEl,selArr,cat,gender,onToggle,onCat){
   chipsEl.innerHTML="";
   PRESETS.filter(p=>(cat==="All"||p.cat===cat)&&(p.gender==="all"||gender==="unknown"||p.gender===gender)).forEach(pr=>{
     const ch=document.createElement("button");ch.type="button";ch.className="preset-chip"+(selArr.includes(pr.id)?" selected":"");
-    ch.textContent=pr.label;ch.title=pr.prompt;ch.onclick=()=>{onToggle(pr.id);ch.classList.toggle("selected");};chipsEl.appendChild(ch);
+    ch.textContent=pr.label;ch.onclick=()=>{onToggle(pr.id);ch.classList.toggle("selected");};chipsEl.appendChild(ch);
   });
 }
-const p2prompt=sel=>sel.map(id=>PRESETS.find(p=>p.id===id)?.prompt).filter(Boolean).join(", ");
+const p2prompt=sel=>sel.map(id=>PRESETS.find(p=>p.id===id)?.label).filter(Boolean).join(", ");
 
 /* ── Cropper ── */
 function destroyCropper(){if(cropper){cropper.destroy();cropper=null;}}
@@ -572,18 +540,41 @@ function initVoiceDesignView(){
       try{const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");if(d.type!=="persona")return;vdDroppedPersonaId=d.id;renderVdPersonaSlot();}catch{}
     };
   }
+  // Reset preset indicator
+  vdSelectedPresetId=null;
+  const ind=$("vd-preset-indicator");if(ind)ind.hidden=true;
+  const descEl2=$("vd-description");if(descEl2){descEl2.readOnly=false;descEl2.classList.remove("preset-locked");descEl2.placeholder="e.g. warm, confident, professional female narrator";}
   // Render preset chips
   const chipsEl=$("vd-preset-chips");
   if(chipsEl){
     chipsEl.innerHTML="";
     VOICE_PRESETS.forEach(vp=>{
-      const btn=document.createElement("button");btn.type="button";btn.className="voice-preset-chip";btn.textContent=vp.label;btn.title=vp.desc;
-      btn.onclick=()=>{const d=$("vd-description");if(d)d.value=vp.desc;};
+      const btn=document.createElement("button");btn.type="button";btn.className="voice-preset-chip";btn.textContent=vp.label;btn.dataset.presetId=vp.id;
+      btn.onclick=()=>applyVoicePreset(vp.id,vp.label);
       chipsEl.appendChild(btn);
     });
   }
   // Ensure design tab is active
   document.querySelector('.tab-btn[data-tab="vd-design"]')?.click();
+}
+
+function applyVoicePreset(id,label){
+  vdSelectedPresetId=id;
+  const d=$("vd-description");
+  if(d){d.value="";d.readOnly=true;d.classList.add("preset-locked");d.placeholder=label;}
+  const ind=$("vd-preset-indicator");
+  if(ind){
+    ind.hidden=false;
+    ind.innerHTML=`<span style="color:var(--secondary);font-weight:600">✦ Preset: ${esc(label)}</span><button type="button" onclick="clearVoicePreset()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:0 0 0 6px">✕</button>`;
+  }
+  document.querySelectorAll(".voice-preset-chip").forEach(b=>{b.classList.toggle("selected",b.dataset.presetId===id);});
+}
+function clearVoicePreset(){
+  vdSelectedPresetId=null;
+  const d=$("vd-description");
+  if(d){d.value="";d.readOnly=false;d.classList.remove("preset-locked");d.placeholder="e.g. warm, confident, professional female narrator";}
+  const ind=$("vd-preset-indicator");if(ind)ind.hidden=true;
+  document.querySelectorAll(".voice-preset-chip").forEach(b=>b.classList.remove("selected"));
 }
 
 function renderVdPersonaSlot(){
@@ -604,12 +595,13 @@ $("vd-design-submit-btn")?.addEventListener("click",async()=>{
   const description=($("vd-description")?.value||"").trim();
   const btn=$("vd-design-submit-btn"),statusEl=$("vd-design-status");
   const includePersona=$("vd-include-persona")?.checked&&!!vdDroppedPersonaId;
-  if(!description&&!includePersona){setStatus(statusEl,"Please describe the voice, or enable persona voice profile.","error");return;}
+  if(!vdSelectedPresetId&&!description&&!includePersona){setStatus(statusEl,"Please describe the voice, select a preset, or enable persona voice profile.","error");return;}
   btn.disabled=true;setStatus(statusEl,"Creating voice…");
   try{
     const fd=new FormData();
     fd.append("name",name);
-    fd.append("description",description);
+    if(vdSelectedPresetId){fd.append("voice_preset_id",vdSelectedPresetId);}
+    else{fd.append("description",description);}
     if(vdDroppedPersonaId){fd.append("persona_id",String(vdDroppedPersonaId));fd.append("include_persona_traits",includePersona?"true":"false");}
     fd.append("client_id",clientId);
     await api("/api/studio/voices/design",{method:"POST",body:fd});
@@ -689,7 +681,7 @@ function renderAvPromptPreview(){
   const grouped={};
   pvPresets.forEach(id=>{
     const p=PRESETS.find(x=>x.id===id);if(!p)return;
-    (grouped[p.cat]=grouped[p.cat]||[]).push(p.prompt);
+    (grouped[p.cat]=grouped[p.cat]||[]).push(p.label);
   });
   const order=["Outfit","Hair","Facial Hair","Makeup","Accessories","Jewelry","Background"];
   const labelMap={Outfit:"Clothing"};
@@ -750,7 +742,7 @@ function renderNavPersonaSlot(){
 function renderNavPromptPreview(){
   const el=$("nav-prompt-preview");if(!el)return;
   const grouped={};
-  navPresets.forEach(id=>{const pr=PRESETS.find(x=>x.id===id);if(!pr)return;(grouped[pr.cat]=grouped[pr.cat]||[]).push(pr.prompt);});
+  navPresets.forEach(id=>{const pr=PRESETS.find(x=>x.id===id);if(!pr)return;(grouped[pr.cat]=grouped[pr.cat]||[]).push(pr.label);});
   const order=["Outfit","Hair","Facial Hair","Makeup","Accessories","Jewelry","Background"];
   const labelMap={Outfit:"Clothing"};
   const lines=[];
@@ -1066,6 +1058,7 @@ $("hangup-call-btn").addEventListener("click",hangup);$("floating-hangup-btn").a
 
 /* ── WS + Data ── */
 function connectWS(){if(ws)ws.close();const proto=location.protocol==="https:"?"wss":"ws";ws=new WebSocket(`${proto}://${location.host}/ws/updates/${clientId}`);ws.addEventListener("message",e=>{try{const m=JSON.parse(e.data);if(m.event?.match(/\./))refreshAll().catch(()=>{});}catch{}});ws.addEventListener("close",()=>{clearTimeout(wsTimer);wsTimer=setTimeout(connectWS,1500);});}
+async function loadPresets(){const data=await api("/api/studio/presets");PRESETS=data.avatar_presets||[];VOICE_PRESETS=data.voice_presets||[];}
 async function loadStudio(){studio=await api("/api/studio/personas");}
 async function loadAssistants(){assistants=await api("/api/studio/assistants");}
 async function loadVoices(){voices=await api("/api/studio/voices");}
@@ -1112,7 +1105,7 @@ window.addEventListener("DOMContentLoaded",async()=>{
   setCallMode("hidden");
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=(v!=="cv-welcome");});
   connectWS();
-  try{await Promise.all([loadStudio(),loadAssistants(),loadVoices()]);}catch(e){console.error("Initial load error:",e);}
+  try{await Promise.all([loadPresets(),loadStudio(),loadAssistants(),loadVoices()]);}catch(e){console.error("Initial load error:",e);}
   renderAll();
   loadLibraryVoices().then(()=>renderLeftVoices()).catch(()=>{});
 });
