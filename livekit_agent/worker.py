@@ -25,8 +25,21 @@ AGENT_NAME = "lili-avatar-agent"
 logger = logging.getLogger("lili-avatar-agent")
 logging.basicConfig(level=logging.INFO)
 
-IDLE_WARN_SECONDS = 10   # silence before "Are you still there?"
-IDLE_BYE_SECONDS  = 5    # extra silence before goodbye + disconnect
+IDLE_WARN_SECONDS = 25   # silence after agent finishes speaking before "Are you still there?"
+IDLE_BYE_SECONDS  = 15   # extra silence before goodbye + disconnect
+
+# Appended to every agent instruction set to enforce dynamic language following.
+_LANGUAGE_LOCK = (
+    "\n\nLANGUAGE RULE — this overrides everything else: "
+    "Always detect the language of the user's most recent message and respond in that exact language. "
+    "If the user switches language mid-conversation, you switch immediately and fully — no lag, no mixing. "
+    "Every single word of your response must be in the user's current language. "
+    "Never insert English words or phrases when the user is speaking a non-English language. "
+    "If the user speaks Hindi → respond in Hindi only. "
+    "If Tamil → Tamil only. If Marathi → Marathi only. If Bengali → Bengali only. "
+    "If the user mixes Hindi and English (Hinglish), mirror that exact mix — do not drift to pure English or pure Hindi. "
+    "Follow the user's language naturally like a fluent bilingual speaker would."
+)
 
 
 async def _idle_monitor(session: AgentSession, ctx: JobContext) -> None:
@@ -41,7 +54,16 @@ async def _idle_monitor(session: AgentSession, ctx: JobContext) -> None:
             warned = False
             warn_time = 0.0
 
+    def _on_agent_state(ev: object) -> None:
+        # Reset the idle clock whenever the agent transitions back to listening
+        # (i.e. it just finished speaking). This prevents the timer from firing
+        # while the agent itself is still talking or during startup.
+        nonlocal last_activity
+        if getattr(ev, "new_state", None) == "listening":
+            last_activity = asyncio.get_event_loop().time()
+
     session.on("user_input_transcribed", _on_user_input)
+    session.on("agent_state_changed", _on_agent_state)
     try:
         while True:
             await asyncio.sleep(1)
@@ -53,7 +75,9 @@ async def _idle_monitor(session: AgentSession, ctx: JobContext) -> None:
                     instructions=(
                         "The user has been silent for a while. "
                         "Briefly ask if they are still there in one short sentence. "
-                        "Use the same language as the conversation so far."
+                        "Use the same language the user was speaking most recently — "
+                        "if they were speaking Hindi, ask in Hindi only; if English, ask in English. "
+                        "Do not mix languages."
                     )
                 )
             elif warned and (now - warn_time) >= IDLE_BYE_SECONDS:
@@ -61,7 +85,10 @@ async def _idle_monitor(session: AgentSession, ctx: JobContext) -> None:
                     instructions=(
                         "The user has not responded. "
                         "Say a warm, brief goodbye and let them know they can start a new call anytime. "
-                        "Use the same language as the conversation so far. One or two sentences only."
+                        "One or two sentences only. "
+                        "Use the same language the user was speaking most recently — "
+                        "if they were speaking Hindi, say goodbye in Hindi only; if English, in English. "
+                        "Do not mix languages."
                     )
                 )
                 await asyncio.sleep(3)
@@ -76,10 +103,15 @@ def _build_stt():
     if provider == "deepgram":
         from livekit.plugins import deepgram
 
-        return deepgram.STT(model=settings.stt_model, api_key=settings.deepgram_api_key or None)
+        return deepgram.STT(
+            model=settings.stt_model,
+            api_key=settings.deepgram_api_key or None,
+            language="multi",  # multilingual streaming — Hindi, English, etc.
+        )
     if provider == "openai":
         from livekit.plugins import openai
 
+        # whisper-1 is multilingual by default — no language param needed
         return openai.STT(model=settings.stt_model, api_key=settings.openai_api_key or None)
     raise RuntimeError(f"Unsupported STT_PROVIDER: {provider}")
 
@@ -124,6 +156,12 @@ def _make_tts(provider: str, model: str, voice_id: str):
             "model": model,
             "api_key": settings.elevenlabs_api_key or None,
             "voice_id": effective_voice_id,
+            # PCM at 16 kHz matches Simli's expected sample rate exactly —
+            # no MP3 decode or resample step, which is the primary cause of lip-sync drift.
+            "encoding": "pcm_16000",
+            # Deliver audio in smaller chunks so the first audio bytes reach
+            # Simli faster, reducing the gap between speech start and lip movement.
+            "chunk_length_schedule": [50, 100, 150, 200],
         }
         return elevenlabs.TTS(**kwargs)
     if provider == "openai":
@@ -166,7 +204,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "Respond in 1–3 sentences unless a detailed answer is genuinely needed. "
             "Be warm, clear, and direct. "
             "Do not use bullet points, numbered lists, or markdown — speak in plain natural sentences."
-        ))
+        )) + _LANGUAGE_LOCK
         first_message = str(assistant.get("first_message") or "")
         llm_provider = (str(assistant.get("llm_provider") or settings.llm_provider)).lower()
         if llm_provider not in {"openai", "gemini"}:
@@ -200,7 +238,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "Respond in 1–3 sentences unless a detailed answer is genuinely needed. "
             "Be warm, clear, and direct. "
             "Do not use bullet points, numbered lists, or markdown — speak in plain natural sentences.",
-        )
+        ) + _LANGUAGE_LOCK
         first_message = ""
         llm_provider = settings.llm_provider
         llm_model = settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
@@ -230,12 +268,26 @@ async def entrypoint(ctx: JobContext) -> None:
 
     from livekit.plugins import simli
 
+    # Monkey-patch SimliConfig to force High Quality stream and SyncAudio
+    if not hasattr(simli.SimliConfig, "_patched_for_hq"):
+        _original_create_json = simli.SimliConfig.create_json
+        def _patched_create_json(self):
+            res = _original_create_json(self)
+            res["isHighQuality"] = True
+            res["syncAudio"] = True
+            return res
+        simli.SimliConfig.create_json = _patched_create_json
+        simli.SimliConfig._patched_for_hq = True
+
     _SIMLI_IDENTITY = "simli-avatar-agent"
     for attempt in range(1, 4):
         avatar = simli.AvatarSession(
             simli_config=simli.SimliConfig(
                 api_key=settings.simli_api_key,
                 face_id=face_id,
+                # Must exceed IDLE_WARN_SECONDS + IDLE_BYE_SECONDS (25+15=40s) so
+                # Simli's own idle timeout never fires before our graceful disconnect.
+                max_idle_time=90,
             )
         )
         await avatar.start(session, ctx.room)
@@ -248,9 +300,11 @@ async def entrypoint(ctx: JobContext) -> None:
         else:
             logger.error("Simli avatar failed to connect after 3 attempts, continuing voice-only")
 
+    from livekit.agents.voice.room_io import RoomOptions
     await session.start(
         agent=Agent(instructions=instructions),
         room=ctx.room,
+        room_options=RoomOptions(audio_output=False),
     )
 
     if first_message:
