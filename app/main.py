@@ -645,6 +645,7 @@ async def post_avatar_preview(
     theme_prompt: str = Form(default=""),
     preset_ids: str = Form(default="[]"),
     custom_prompt: str = Form(default=""),
+    skip_style: bool = Form(default=False),
     client_id: str | None = Form(default=None),
 ) -> dict:
     """Queue avatar image generation in background. Returns avatar_id immediately."""
@@ -652,13 +653,14 @@ async def post_avatar_preview(
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not found")
 
-    parsed_preset_ids = _parse_preset_ids(preset_ids)
-    full_prompt = build_avatar_edit_prompt(parsed_preset_ids, custom_prompt) or theme_prompt
+    parsed_preset_ids = [] if skip_style else _parse_preset_ids(preset_ids)
+    effective_custom_prompt = "" if skip_style else custom_prompt
+    full_prompt = "" if skip_style else (build_avatar_edit_prompt(parsed_preset_ids, custom_prompt) or theme_prompt)
     avatar_id = insert_persona_avatar(
         {
             "persona_id": persona_id,
             "name": name,
-            "decoration": theme_prompt,
+            "decoration": "" if skip_style else theme_prompt,
             "theme_prompt": full_prompt,
             "preset_ids": json.dumps(parsed_preset_ids),
             "face_id": "",
@@ -673,9 +675,10 @@ async def post_avatar_preview(
             persona_id=persona_id,
             persona_image_bytes=read_persona_image_bytes(persona),
             preset_ids=parsed_preset_ids,
-            custom_prompt=custom_prompt,
+            custom_prompt=effective_custom_prompt,
             name=name,
             client_id=client_id,
+            skip_style=skip_style,
         )
     )
     await send_avatar_event(client_id, "avatar.generating", avatar_id=avatar_id, persona_id=persona_id, name=name)
@@ -691,9 +694,10 @@ async def _run_avatar_image_generation(
     custom_prompt: str,
     name: str,
     client_id: str | None,
+    skip_style: bool = False,
 ) -> None:
     try:
-        prompt = build_avatar_edit_prompt(preset_ids, custom_prompt)
+        prompt = "" if skip_style else build_avatar_edit_prompt(preset_ids, custom_prompt)
         if prompt:
             edited_bytes = await ai_router.generate_avatar(
                 persona_image_bytes,

@@ -705,22 +705,32 @@ async function genAvatarPreview(personaId,name,sel,themeEl,previewAreaEl,imgEl,s
   setStatus(statusEl,"Preview ready.");return tp;
 }
 
+function applyAvSkipStyle(){
+  const cb=$("av-skip-style"),block=$("av-style-block");
+  if(!cb||!block)return;
+  block.classList.toggle("style-block-disabled",cb.checked);
+}
+$("av-skip-style")?.addEventListener("change",applyAvSkipStyle);
+
 $("av-generate-btn").addEventListener("click",async()=>{
   const p=getPersona();if(!p)return;
   const nameEl=$("av-name-input");
   const name=(nameEl?.value.trim())||p.name;
   const customPrompt=$("av-theme-input")?.value.trim()||"";
+  const skipStyle=!!$("av-skip-style")?.checked;
   const btn=$("av-generate-btn");btn.disabled=true;
   setStatus($("av-status"),"Queued — generating in background…","success");
   try{
     const fd=new FormData();
     fd.append("persona_id",p.id);fd.append("name",name);
-    fd.append("preset_ids",JSON.stringify(pvPresets));
-    fd.append("custom_prompt",customPrompt);
+    fd.append("preset_ids",JSON.stringify(skipStyle?[]:pvPresets));
+    fd.append("custom_prompt",skipStyle?"":customPrompt);
+    fd.append("skip_style",skipStyle?"true":"false");
     fd.append("client_id",clientId);
     await api("/api/studio/avatars/preview",{method:"POST",body:fd});
     pvPresets=[];pvPresetCat="All";if(nameEl)nameEl.value=p.name;
     const ti=$("av-theme-input");if(ti)ti.value="";
+    const sk=$("av-skip-style");if(sk)sk.checked=false;applyAvSkipStyle();
     renderAvPromptPreview();initPersonaView();await refreshAll();
   }catch(e){setStatus($("av-status"),e.message,"error");}
   finally{btn.disabled=false;}
@@ -775,23 +785,33 @@ function initNewAvatarView(){
     }catch{}
   };
 }
+function applyNavSkipStyle(){
+  const cb=$("nav-skip-style"),block=$("nav-style-block");
+  if(!cb||!block)return;
+  block.classList.toggle("style-block-disabled",cb.checked);
+}
+$("nav-skip-style")?.addEventListener("change",applyNavSkipStyle);
+
 $("nav-generate-btn").addEventListener("click",async()=>{
   if(!navDroppedPersonaId){setStatus($("nav-status"),"Drop a persona onto the slot first.","error");return;}
   const p=studio.find(x=>x.id===navDroppedPersonaId);if(!p)return;
   const nameEl=$("nav-name-input");
   const name=(nameEl?.value.trim())||p.name;
   const customPrompt=$("nav-theme-input")?.value.trim()||"";
+  const skipStyle=!!$("nav-skip-style")?.checked;
   const btn=$("nav-generate-btn");btn.disabled=true;
   setStatus($("nav-status"),"Queued — generating in background…","success");
   try{
     const fd=new FormData();
     fd.append("persona_id",p.id);fd.append("name",name);
-    fd.append("preset_ids",JSON.stringify(navPresets));
-    fd.append("custom_prompt",customPrompt);
+    fd.append("preset_ids",JSON.stringify(skipStyle?[]:navPresets));
+    fd.append("custom_prompt",skipStyle?"":customPrompt);
+    fd.append("skip_style",skipStyle?"true":"false");
     fd.append("client_id",clientId);
     await api("/api/studio/avatars/preview",{method:"POST",body:fd});
     navPresets=[];navPresetCat="All";if(nameEl)nameEl.value="";
     const ti=$("nav-theme-input");if(ti)ti.value="";
+    const sk=$("nav-skip-style");if(sk)sk.checked=false;applyNavSkipStyle();
     renderNavPromptPreview();renderNavPresets();await refreshAll();
   }catch(e){setStatus($("nav-status"),e.message,"error");}
   finally{btn.disabled=false;}

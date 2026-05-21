@@ -62,10 +62,23 @@
     textarea.preset-locked{opacity:.55;cursor:not-allowed;border-color:var(--secondary);background:rgba(168,85,247,.06)}
     .prompt-preview{margin-top:6px;padding:7px 10px;border-radius:6px;background:rgba(255,255,255,.04);border:1px solid var(--border);font-size:11px;color:var(--dim);line-height:1.6;word-break:break-word}
     .avatar-preview-spin{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);backdrop-filter:blur(2px);border-radius:inherit;pointer-events:none}
+
+    /* ── Skip-style toggle ── */
+    .skip-style-field{margin-top:4px}
+    .skip-style-toggle{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,.03);transition:all .15s}
+    .skip-style-toggle:hover{border-color:rgba(168,85,247,.45);background:rgba(168,85,247,.06)}
+    .skip-style-toggle input{position:absolute;opacity:0;pointer-events:none}
+    .skip-style-toggle .switch{position:relative;flex:0 0 36px;width:36px;height:20px;border-radius:999px;background:rgba(255,255,255,.12);border:1px solid var(--border);transition:background .15s,border-color .15s}
+    .skip-style-toggle .switch::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#cfd2da;transition:transform .15s,background .15s}
+    .skip-style-toggle input:checked + .switch{background:rgba(168,85,247,.45);border-color:var(--secondary)}
+    .skip-style-toggle input:checked + .switch::after{transform:translateX(16px);background:#fff}
+    .skip-style-label{font-size:13px;font-weight:500;color:var(--dim);display:flex;flex-direction:column;line-height:1.3}
+    .skip-style-label .field-note{font-weight:400;font-size:11px;color:var(--muted);margin-left:0;margin-top:2px}
+    .style-block-disabled{opacity:.4;pointer-events:none;filter:grayscale(.3)}
   </style>
   <script src="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js" defer></script>
-  <script src="/static/app.js?v=20260508a" defer></script>
+  <script src="/static/app.js?v=20260521a" defer></script>
 </head>
 <body>
 <div class="app-shell" id="app-shell">
@@ -225,12 +238,21 @@
       <div id="pv-avatar" class="tab-pane cv-body" hidden>
         <div class="field"><label for="av-name-input">Avatar Name</label>
           <input id="av-name-input" type="text" placeholder="e.g. Corporate Sophie" maxlength="100"/></div>
-        <div class="field"><label>Style Presets <span class="field-note">Select multiple</span></label>
-          <div id="pv-preset-cats" class="preset-categories"></div>
-          <div id="pv-preset-chips" class="preset-chips"></div>
-          <div id="av-prompt-preview" class="prompt-preview" hidden></div></div>
-        <div class="field"><label for="av-theme-input">Custom Prompt <span class="field-note">Optional</span></label>
-          <input id="av-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
+        <div class="field skip-style-field">
+          <label class="skip-style-toggle">
+            <input id="av-skip-style" type="checkbox"/>
+            <span class="switch"></span>
+            <span class="skip-style-label">Skip styling <span class="field-note">Use original photo, no AI edit</span></span>
+          </label>
+        </div>
+        <div id="av-style-block">
+          <div class="field"><label>Style Presets <span class="field-note">Select multiple</span></label>
+            <div id="pv-preset-cats" class="preset-categories"></div>
+            <div id="pv-preset-chips" class="preset-chips"></div>
+            <div id="av-prompt-preview" class="prompt-preview" hidden></div></div>
+          <div class="field"><label for="av-theme-input">Custom Prompt <span class="field-note">Optional</span></label>
+            <input id="av-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
+        </div>
         <p id="av-status" class="status-msg"></p>
       </div>
       <div class="cv-actions">
@@ -362,13 +384,22 @@
         </div>
         <div class="field"><label for="nav-name-input">Avatar Name</label>
           <input id="nav-name-input" type="text" placeholder="e.g. Corporate Sophie" maxlength="100"/></div>
-        <div class="field"><label>Style Presets <span class="field-note">Select multiple</span></label>
-          <div id="nav-preset-cats" class="preset-categories"></div>
-          <div id="nav-preset-chips" class="preset-chips"></div>
-          <div id="nav-prompt-preview" class="prompt-preview" hidden></div>
+        <div class="field skip-style-field">
+          <label class="skip-style-toggle">
+            <input id="nav-skip-style" type="checkbox"/>
+            <span class="switch"></span>
+            <span class="skip-style-label">Skip styling <span class="field-note">Use original photo, no AI edit</span></span>
+          </label>
         </div>
-        <div class="field"><label for="nav-theme-input">Custom Prompt <span class="field-note">Optional</span></label>
-          <input id="nav-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
+        <div id="nav-style-block">
+          <div class="field"><label>Style Presets <span class="field-note">Select multiple</span></label>
+            <div id="nav-preset-cats" class="preset-categories"></div>
+            <div id="nav-preset-chips" class="preset-chips"></div>
+            <div id="nav-prompt-preview" class="prompt-preview" hidden></div>
+          </div>
+          <div class="field"><label for="nav-theme-input">Custom Prompt <span class="field-note">Optional</span></label>
+            <input id="nav-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
+        </div>
         <p id="nav-status" class="status-msg"></p>
       </div>
       <div class="cv-actions">
