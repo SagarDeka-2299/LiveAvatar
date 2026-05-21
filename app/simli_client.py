@@ -13,7 +13,7 @@ class SimliError(RuntimeError):
     pass
 
 
-def _parse_json_response(response: httpx.Response) -> Any:
+def _parse_json_response(response: httpx.Response) -> Any: 
     try:
         return response.json()
     except ValueError:
