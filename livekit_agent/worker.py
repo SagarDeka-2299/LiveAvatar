@@ -17,8 +17,9 @@ if str(ROOT) not in sys.path:
 
 load_dotenv()
 
+from app import repositories as repo  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.db import get_assistant, get_persona_entity  # noqa: E402
+from app.tenancy import open_background_context  # noqa: E402
 
 AGENT_NAME = "lili-avatar-agent"
 
@@ -175,27 +176,72 @@ def _make_tts(provider: str, model: str, voice_id: str):
     raise RuntimeError(f"Unsupported TTS provider: {provider}")
 
 
-def _load_assistant_from_job(ctx: JobContext) -> dict | None:
+async def _load_assistant_from_job(
+    ctx: JobContext,
+) -> tuple[str, dict | None, dict | None]:
+    """Return ``(tenant_id, assistant_dict, persona_dict)`` from the dispatch metadata.
+
+    Tenant ID is required so the worker can hit the correct tenant DB. If the
+    metadata is missing or malformed we return empty strings/None and the
+    caller falls back to environment defaults.
+    """
     meta_str = getattr(getattr(ctx, "job", None), "metadata", "") or ""
     if not meta_str:
-        return None
+        return "", None, None
     try:
         meta = json.loads(meta_str)
     except Exception:
-        return None
-    aid = meta.get("assistant_id")
-    if not isinstance(aid, int):
-        try:
-            aid = int(aid)
-        except Exception:
-            return None
-    return get_assistant(aid)
+        return "", None, None
+    tenant_id = str(meta.get("tenant_id") or "")
+    aid_raw = meta.get("assistant_id")
+    try:
+        aid = int(aid_raw)
+    except (TypeError, ValueError):
+        return tenant_id, None, None
+    if not tenant_id:
+        return "", None, None
+    try:
+        async with open_background_context(tenant_id) as tctx:
+            assistant = await repo.get_assistant(tctx.session, aid)
+            persona = None
+            if assistant is not None and assistant.persona_id:
+                persona = await repo.get_persona_entity(
+                    tctx.session, assistant.persona_id
+                )
+            asst_dict = (
+                {
+                    "id": assistant.id,
+                    "name": assistant.name,
+                    "prompt": assistant.prompt,
+                    "first_message": assistant.first_message,
+                    "persona_id": assistant.persona_id,
+                    "face_id": assistant.face_id,
+                    "voice_provider": assistant.voice_provider,
+                    "voice_id": assistant.voice_id,
+                    "llm_provider": assistant.llm_provider,
+                    "llm_model": assistant.llm_model,
+                }
+                if assistant is not None
+                else None
+            )
+            persona_dict = (
+                {
+                    "voice_provider": persona.voice_provider,
+                    "voice_id": persona.voice_id,
+                }
+                if persona is not None
+                else None
+            )
+            return tenant_id, asst_dict, persona_dict
+    except Exception:
+        logger.exception("Failed to load assistant %s for tenant %s", aid, tenant_id)
+        return tenant_id, None, None
 
 
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
-    assistant = _load_assistant_from_job(ctx)
+    _tenant_id, assistant, persona_row = await _load_assistant_from_job(ctx)
     if assistant:
         face_id = str(assistant.get("face_id") or settings.default_simli_face_id or "")
         instructions = str(assistant.get("prompt") or (
@@ -212,17 +258,9 @@ async def entrypoint(ctx: JobContext) -> None:
         llm_model = str(assistant.get("llm_model") or "") or (
             settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
         )
-        # Read voice from the persona as the authoritative source: assistants are
-        # created with a snapshot of the persona's voice, but the user can change
-        # the persona's voice afterwards. Reading from persona on each call
-        # guarantees fresh voice data even if assistant rows weren't propagated.
-        persona_row = None
-        pid = assistant.get("persona_id")
-        if pid:
-            try:
-                persona_row = get_persona_entity(int(pid))
-            except Exception:
-                persona_row = None
+        # The persona is the authoritative source for voice: users may change
+        # the persona's voice after the assistant was created. Fall back to the
+        # assistant's snapshot only if the persona has nothing set.
         if persona_row and persona_row.get("voice_id"):
             voice_provider_override = (str(persona_row.get("voice_provider") or "")).lower()
             voice_id_override = str(persona_row.get("voice_id") or "")

@@ -13,6 +13,14 @@ dependencies = [
   "pydantic>=2.8.0",
   "livekit-api>=0.8.2",
   "livekit-agents[openai,google,deepgram,elevenlabs,cartesia,silero,simli]>=1.4.0",
+  "sqlalchemy[asyncio]>=2.0.30",
+  "asyncpg>=0.29.0",
+  "aiosqlite>=0.20.0",
+  "alembic>=1.13.0",
+  "azure-identity>=1.17.0",
+  "azure-keyvault-secrets>=4.8.0",
+  "azure-storage-blob>=12.20.0",
+  "aiohttp>=3.9.0",
 ]
 
 [project.optional-dependencies]

@@ -11,14 +11,19 @@ def build_agent_dispatch_room_config(
     *,
     room_name: str,
     assistant_id: int,
+    tenant_id: str,
 ) -> api.RoomConfiguration:
     """Pre-configure a room so an explicit-dispatch agent joins when the first user connects.
 
-    The agent worker reads ctx.job.metadata to know which assistant to serve.
+    The agent worker reads ctx.job.metadata to know which tenant and assistant
+    to serve. Both identifiers are required: the worker must look the
+    assistant up in the right tenant DB.
     """
     dispatch = api.RoomAgentDispatch(
         agent_name=AGENT_NAME,
-        metadata=json.dumps({"assistant_id": assistant_id}),
+        metadata=json.dumps(
+            {"tenant_id": tenant_id, "assistant_id": assistant_id}
+        ),
     )
     return api.RoomConfiguration(name=room_name, agents=[dispatch])
 

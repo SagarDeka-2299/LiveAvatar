@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json as _json
 from typing import Any
 
 import httpx
@@ -23,13 +24,25 @@ async def add_cloned_voice(
     audio_bytes: bytes,
     filename: str,
     mime_type: str = "audio/mpeg",
+    labels: dict[str, str] | None = None,
 ) -> str:
-    """Instant Voice Cloning. Returns voice_id. Requires paid tier."""
+    """Instant Voice Cloning. Returns voice_id. Requires paid tier.
+
+    ``labels`` may include any of ``gender``, ``age``, ``accent``,
+    ``language`` (free-form key/value strings — the documented keys are
+    those four). Empty values are dropped.
+    """
     if not api_key:
         raise ElevenLabsError("ELEVENLABS_API_KEY is missing")
 
     files = [("files", (filename, audio_bytes, mime_type))]
-    data = {"name": name, "description": description[:500] if description else ""}
+    data: dict[str, str] = {
+        "name": name,
+        "description": description[:500] if description else "",
+    }
+    clean_labels = _clean_labels(labels)
+    if clean_labels:
+        data["labels"] = _json.dumps(clean_labels)
     headers = {"xi-api-key": api_key}
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
@@ -90,16 +103,24 @@ async def create_voice_from_preview(
     name: str,
     description: str,
     generated_voice_id: str,
+    labels: dict[str, str] | None = None,
 ) -> str:
-    """Voice Design step 2: commit a preview into a persistent voice. Returns voice_id."""
+    """Voice Design step 2: commit a preview into a persistent voice. Returns voice_id.
+
+    ``labels`` is forwarded to the upstream ``labels`` field — accepted keys
+    documented as ``gender`` / ``age`` / ``accent`` / ``language``.
+    """
     if not api_key:
         raise ElevenLabsError("ELEVENLABS_API_KEY is missing")
 
-    payload = {
+    payload: dict[str, Any] = {
         "voice_name": name,
         "voice_description": description,
         "generated_voice_id": generated_voice_id,
     }
+    clean_labels = _clean_labels(labels)
+    if clean_labels:
+        payload["labels"] = clean_labels
     headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
@@ -202,6 +223,20 @@ def _raise_for_status(response: httpx.Response, payload: Any, *, action: str) ->
         status_code=response.status_code,
         code=code,
     )
+
+
+def _clean_labels(labels: dict[str, str] | None) -> dict[str, str]:
+    """Drop empty / non-string entries; coerce values to ``str``."""
+    if not labels:
+        return {}
+    out: dict[str, str] = {}
+    for k, v in labels.items():
+        if not k:
+            continue
+        sv = str(v).strip() if v is not None else ""
+        if sv:
+            out[str(k)] = sv
+    return out
 
 
 def _dig(data: Any, key: str) -> Any:

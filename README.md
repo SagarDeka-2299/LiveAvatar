@@ -1,1320 +1,447 @@
-# Lili Studio
+# Lili Studio API
 
-> **AI Avatar Studio** — design a persona, generate a photorealistic face, design or clone a voice, then conduct a real-time video conversation with your assistant.
-
-Lili Studio is a full-stack workbench that takes you from **concept → photoreal avatar → voice-acted assistant → live video call** in minutes. It unifies best-in-class providers (Simli, LiveKit, ElevenLabs, Gemini, Deepgram) behind a single drag-and-drop interface.
-
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
-![LiveKit](https://img.shields.io/badge/LiveKit-WebRTC-orange)
-
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Architecture](#architecture)
-- [End-to-End Workflow](#end-to-end-workflow)
-- [User Flow](#user-flow)
-- [Setup](#setup)
-- [Configuration](#configuration)
-- [Running Locally](#running-locally)
-- [Project Structure](#project-structure)
-- [Database Schema](#database-schema)
-- [API Reference](#api-reference)
-- [How Calls Work Under the Hood](#how-calls-work-under-the-hood)
-- [Troubleshooting](#troubleshooting)
-- [Credits](#credits)
-
----
-
-## Features
-
-| Feature | Description |
-|:---|:---|
-| **Personas** | Upload a portrait, auto-detect gender, store identity and system prompt. |
-| **Avatar Generator** | AI-edit the portrait (background, outfit, lighting presets) using Gemini `nano-banana` / OpenAI `gpt-image-1`. Register the result with Simli to obtain a `face_id` for live animation. |
-| **Voice Design** | Describe a voice in natural language — ElevenLabs Voice Design synthesises an AI voice tailored to the persona's portrait. |
-| **Voice Cloning** | Upload a 30-second audio sample — ElevenLabs Voice Clone produces a faithful reproduction. |
-| **Voice Library** | Browse the ElevenLabs Voice Library and add any voice to the studio in a single click. |
-| **Assistants** | Bind one persona + one avatar + one voice + one LLM into a callable assistant. |
-| **Live Video Calls** | Click **Start Call** for an instant WebRTC session. The avatar lip-syncs to TTS audio in real time. |
-| **Streaming Updates** | A WebSocket channel delivers live progress events (avatar generating, voice processing, Simli registering) directly to the UI. |
-
----
-
-## Tech Stack
-
-### Core
-
-| Component | Technology |
-|:---|:---|
-| HTTP + WebSocket server | **FastAPI** (async) |
-| Dependency management | **uv** (fast, reproducible) |
-| Persistence | **SQLite** (personas, voices, avatars, assistants) |
-| Frontend | **Vanilla JS + HTML + CSS** — zero-framework single-page UI |
-| Deployment | **Docker Compose** — `flow` API + `worker` LiveKit agent |
-
-### Realtime Stack
-
-| Component | Technology |
-|:---|:---|
-| WebRTC SFU | **LiveKit Cloud** — room management and agent dispatch |
-| Agent orchestration | **LiveKit Agents (Python)** — STT → LLM → TTS → avatar pipeline |
-| Face animation | **Simli** — photoreal lip-sync as a virtual LiveKit participant |
-
-### AI Providers
-
-All providers are hot-swappable via environment variables — no code changes required.
-
-| Task | Default | Alternative |
-|:---|:---|:---|
-| Gender detection | Gemini 3 Flash | OpenAI GPT-5-nano |
-| Avatar image edit | Gemini 3.1 Flash Image | OpenAI `gpt-image-1` |
-| In-call LLM | Gemini 3 Flash | OpenAI GPT-5-mini |
-| Speech-to-text | Deepgram Nova-3 | OpenAI Whisper |
-| Text-to-speech | ElevenLabs Flash v2.5 | OpenAI / Google |
-| Voice design / clone | ElevenLabs | — |
-
----
-
-## Architecture
-
-```
-                         ┌──────────────────────────────────────────────────────┐
-                         │                      Browser                         │
-                         │  Studio UI (drag-drop persona/voice/avatar)          │
-                         │  LiveKit JS SDK (WebRTC client during calls)         │
-                         └───────────────┬────────────────────┬─────────────────┘
-                                         │ HTTP/WS            │ WebRTC
-                                         ▼                    ▼
-       ┌───────────────────────────────────────┐   ┌────────────────────────────┐
-       │       avatar-agent-flow (FastAPI)     │   │       LiveKit Cloud        │
-       │  • REST API for personas/voices/...   │   │  • Room SFU                │
-       │  • Orchestrates avatar generation     │   │  • Agent dispatch          │
-       │  • Issues LiveKit join tokens         │   │                            │
-       │  • SQLite + uploads volume            │   └─────────────┬──────────────┘
-       └────────┬───────────────┬────────┬─────┘                 │
-                │               │        │                       │ dispatches job
-                ▼               ▼        ▼                       ▼
-       ┌─────────────┐ ┌──────────────┐ ┌─────────────┐  ┌──────────────────────┐
-       │  ElevenLabs │ │    Gemini    │ │   Simli     │  │ avatar-agent-worker  │
-       │  voices/TTS │ │  image+LLM   │ │  face API   │  │  (LiveKit agent)     │
-       └─────────────┘ └──────────────┘ └─────────────┘  │  • STT (Deepgram)    │
-                                                         │  • LLM (Gemini/GPT)  │
-                                                         │  • TTS (ElevenLabs)  │
-                                                         │  • Simli avatar      │
-                                                         └──────────┬───────────┘
-                                                                    │ DataStream (PCM)
-                                                                    ▼
-                                                         ┌──────────────────────┐
-                                                         │  Simli render server │
-                                                         │  (face + voice)      │
-                                                         └──────────┬───────────┘
-                                                                    │ audio+video RTC
-                                                                    ▼
-                                                              [back to room]
-```
-
-Two containers share a single SQLite volume:
-
-| Service | Role |
-|:---|:---|
-| `avatar-agent-flow` | FastAPI application on `:8000`. Serves the studio UI, REST API, and WebSocket. |
-| `avatar-agent-worker` | LiveKit agent. Remains idle until a call arrives, then spawns a per-call subprocess. |
-
----
-
-## End-to-End Workflow
-
-### 1. Create a Persona
-
-```
-POST /api/studio/personas    (multipart: image + prompt + name)
-        │
-        ├─► Save uploaded portrait
-        ├─► Gemini Vision → detect apparent gender
-        └─► Insert persona row, return entity
-```
-
-### 2. Generate an Avatar
-
-```
-POST /api/studio/avatars/preview        ←  fast preview (no Simli upload)
-        │
-        ├─► Gemini Image Edit (nano-banana)
-        │     • prompt-chain: outfit → background → lighting
-        │     • returns edited PNG/JPEG
-        └─► Save preview, push WS event "avatar.preview"
-
-POST /api/studio/avatars                ←  commit + register with Simli
-        │
-        ├─► Upload preview to Simli /faces/legacy
-        │     • 3× retry with backoff on transient SSL/network errors
-        ├─► Poll Simli for face generation status
-        └─► Persist face_id, push WS events
-```
-
-### 3. Design or Clone a Voice
-
-```
-POST /api/studio/voices/design          ←  AI voice design
-        │
-        ├─► Gemini Vision → describe ideal voice from portrait
-        ├─► ElevenLabs Voice Design → 3 candidates
-        ├─► User picks one → persisted in voices table
-        └─► Optionally link to a persona (voice_ref_id)
-
-POST /api/studio/voices/clone           ←  voice cloning
-POST /api/studio/voices/from-library    ←  pick a stock ElevenLabs voice
-```
-
-### 4. Build an Assistant
-
-```
-POST /api/studio/assistants
-        │
-        ├─► Snapshot persona's voice + face_id
-        ├─► Set LLM provider/model
-        └─► Insert assistant row (status=ready)
-```
-
-### 5. Start a Call
-
-```
-POST /api/studio/calls   { assistant_id }
-        │
-        ├─► Create unique LiveKit room
-        ├─► Configure agent dispatch with assistant_id metadata
-        ├─► Mint join token for the browser
-        └─► Return { livekit_url, participant_token, room_name }
-
-Browser → room.connect(url, token) → publishes microphone
-
-LiveKit dispatches job → worker.entrypoint(ctx)
-        │
-        ├─► Load assistant from DB
-        ├─► Read voice from PERSONA (authoritative — fresh on every call)
-        ├─► Build STT (Deepgram), LLM (Gemini), TTS (ElevenLabs)
-        ├─► Create AgentSession
-        ├─► simli.AvatarSession.start(session, room)   ← redirects TTS audio
-        │     to Simli via LiveKit DataStream (16 kHz PCM)
-        ├─► Retry up to 3× if Simli rate-limits, verifying participant joined
-        └─► session.start(agent, room) → conversation begins
-
-Simli server
-        │
-        ├─► Receives PCM via DataStream
-        ├─► Renders face animation locked to incoming audio
-        └─► Publishes synced audio + video as RTC tracks → browser
-```
-
----
-
-## User Flow
-
-```
-┌──────────┐   ┌──────────┐   ┌──────────┐   ┌────────────┐   ┌─────────┐
-│  Upload  │──►│ Generate │──►│  Design  │──►│   Build    │──►│  Call   │
-│ portrait │   │  avatar  │   │  voice   │   │ assistant  │   │  live   │
-└──────────┘   └──────────┘   └──────────┘   └────────────┘   └─────────┘
-   persona       face_id      voice_id /         binds         WebRTC
-   created       from Simli   ref_id          all together     conversation
-```
-
-The studio is organised around a **drag-and-drop** sidebar:
-
-1. **Voices panel (top-left)** — designed/cloned voices and the ElevenLabs library.
-2. **Personas panel** — each persona is a card; click to edit on the right.
-3. **Avatars panel** — variant faces generated from a persona; each carries its own Simli `face_id`.
-4. **Contacts panel** — completed assistants, ready to call.
-
-To associate a voice with a persona, **drag the voice card onto the persona's voice slot**. Saving the persona propagates the new voice to every linked assistant — the next call uses the updated voice immediately, with no manual rebuild required.
+A multi-tenant FastAPI service that turns a user-supplied portrait + voice
+into a real-time AI assistant joinable as a LiveKit room. Every request is
+scoped to a `tenant_id` whose database (Postgres) and media store (Azure
+Blob) are resolved at request time from Azure Key Vault. A working reference
+front-end is mounted at `/demo`.
 
 ---
 
 ## Setup
 
-### Prerequisites
+### Docker
 
-- **Docker** + **Docker Compose** (recommended) **or** Python 3.12 + [`uv`](https://docs.astral.sh/uv/)
-- API keys for: LiveKit Cloud, Simli, ElevenLabs, Gemini (or OpenAI), Deepgram
-- A modern Chromium-based browser (microphone permission required for calls)
-
-### Installation
+The repo ships with a `Dockerfile`. Build, then run with the env vars below.
 
 ```bash
-git clone https://github.com/SagarDeka-2299/LiveAvatar.git
-cd LiveAvatar
-cp .env.example .env
-# populate your API keys in .env
+docker build -t lili-api .
+docker run --rm -p 8000:8000 --env-file .env lili-api
+# OpenAPI docs at http://localhost:8000/docs
 ```
 
-For local development without Docker:
+### Environment variables
 
-```bash
-uv sync
-```
+Only the API container reads these — per-tenant Postgres / Azure Storage
+credentials live in Key Vault and are not env vars.
+
+| Variable | Purpose |
+| --- | --- |
+| `AZURE_KEYVAULT_URL` | `https://<vault>.vault.azure.net/` |
+| `AZURE_CLIENT_ID` | Service-principal app id |
+| `AZURE_TENANT_ID` | Azure AD tenant of the SP (≠ our customer `tenant_id`) |
+| `AZURE_CLIENT_SECRET` | Service-principal secret |
+| `TENANT_SECRET_TTL_SECONDS` | In-process cache TTL for per-tenant secrets (default `600`) |
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | LiveKit room credentials |
+| `SIMLI_API_KEY` | Simli avatar API key |
+| `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | AI provider keys |
+| `GENDER_PROVIDER`, `GENDER_MODEL_GEMINI`, `GENDER_MODEL_OPENAI` | Vision gender classifier |
+| `IMAGE_PROVIDER`, `IMAGE_MODEL_GEMINI`, `IMAGE_MODEL_OPENAI` | Avatar image editor |
+| `LLM_PROVIDER`, `LLM_MODEL_OPENAI`, `LLM_MODEL_GEMINI` | In-call LLM |
+| `STT_PROVIDER`, `STT_MODEL` | In-call STT |
+| `TTS_PROVIDER`, `TTS_MODEL`, `TTS_VOICE_ID` | In-call TTS defaults |
+| `DEFAULT_SIMLI_FACE_ID`, `DEFAULT_SIMLI_VOICE_PROVIDER`, `DEFAULT_SIMLI_VOICE_MODEL`, `DEFAULT_SIMLI_VOICE_ID` | Fallback Simli avatar |
+| `LOCAL_TENANT_ID` | Sentinel id that triggers local fallback. Default `local_tenant` |
+| `LOCAL_DATA_DIR` | Where the local fallback writes SQLite + blob files. Default `./local_data` |
+| `LOCAL_BLOB_BASE_URL` | URL stamped into rows when running the local fallback. Default `http://localhost:8000/local-blob` |
+
+### Quick local test
+
+Send `tenant_id="local_tenant"` (or whatever `LOCAL_TENANT_ID` resolves to)
+on any request. The backend transparently swaps Postgres for a per-tenant
+SQLite file and Azure Blob for `LOCAL_DATA_DIR/<tenant_id>/blob/`. No Azure
+setup required. Reset the local state by deleting `LOCAL_DATA_DIR`.
 
 ---
 
-## Configuration
+## Azure Key Vault — per-tenant secrets
 
-All provider selection and credentials are controlled through `.env`. The complete variable set:
+For each customer tenant the operator pre-creates these secrets in Key Vault:
 
-```bash
-# ── Realtime infrastructure ──────────────────────────────────────────────────
-LIVEKIT_URL=wss://your-project.livekit.cloud
-LIVEKIT_API_KEY=...
-LIVEKIT_API_SECRET=...
-SIMLI_API_KEY=...
+| Secret name | Value |
+| --- | --- |
+| `{tenant_id}-db-url` | Postgres URL, e.g. `postgresql+asyncpg://user:pass@host:5432/db` |
+| `{tenant_id}-blob-account-url` | `https://<account>.blob.core.windows.net/` |
+| `{tenant_id}-blob-account-name` | `<account>` |
+| `{tenant_id}-blob-account-key` | Access key |
+| `{tenant_id}-blob-container` | Container name |
 
-# ── Provider API keys ─────────────────────────────────────────────────────────
-OPENAI_API_KEY=...
-GEMINI_API_KEY=...
-DEEPGRAM_API_KEY=...
-ELEVENLABS_API_KEY=...
+**`tenant_id` charset**: `[a-zA-Z0-9-]{1,63}` (Key Vault secret-name rules).
 
-# ── Task 1: gender detection (vision) ────────────────────────────────────────
-GENDER_PROVIDER=gemini                       # openai | gemini
-GENDER_MODEL_GEMINI=gemini-3-flash-preview
-GENDER_MODEL_OPENAI=gpt-5-nano
-
-# ── Task 2: avatar image edit ─────────────────────────────────────────────────
-IMAGE_PROVIDER=gemini                        # openai | gemini
-IMAGE_MODEL_GEMINI=gemini-3.1-flash-image-preview
-IMAGE_MODEL_OPENAI=gpt-image-1
-
-# ── Task 3: in-call LLM ───────────────────────────────────────────────────────
-LLM_PROVIDER=gemini                          # openai | gemini
-LLM_MODEL_OPENAI=gpt-5-mini
-LLM_MODEL_GEMINI=gemini-3-flash-preview
-
-# ── Task 4: speech-to-text ───────────────────────────────────────────────────
-STT_PROVIDER=deepgram                        # deepgram | openai
-STT_MODEL=nova-3-general
-
-# ── Task 5: text-to-speech ───────────────────────────────────────────────────
-TTS_PROVIDER=elevenlabs                      # elevenlabs | openai | google
-TTS_MODEL=eleven_flash_v2_5
-TTS_VOICE_ID=                                # leave blank → fallback Sarah voice
-
-# ── Simli defaults ────────────────────────────────────────────────────────────
-DEFAULT_SIMLI_FACE_ID=
-DEFAULT_SIMLI_VOICE_PROVIDER=elevenlabs
-DEFAULT_SIMLI_VOICE_MODEL=eleven_flash_v2_5
-DEFAULT_SIMLI_VOICE_ID=
-```
-
-Every `*_PROVIDER` variable is hot-swappable — update the value and restart the service. There is no provider lock-in.
+**Container ACL**: must be **anonymous read** (`public-access blob`) — the
+API hands back the bare blob URL and never signs it. Without that ACL,
+returned URLs return 403.
 
 ---
 
-## Running Locally
+## Database schema (per tenant)
 
-### Docker (Recommended)
-
-```bash
-docker compose up --build -d
-```
-
-Navigate to `http://localhost:8000` to open the studio. Two containers start:
-
-```
-NAME                    STATUS    PORTS
-avatar-agent-flow       Up        0.0.0.0:8000->8000/tcp
-avatar-agent-worker     Up
-```
-
-**View logs:**
-
-```bash
-docker compose logs -f avatar-agent-flow      # API logs
-docker compose logs -f avatar-agent-worker    # call/agent logs
-```
-
-**Stop:**
-
-```bash
-docker compose down
-```
-
-### Without Docker
-
-Open two terminals — one per process:
-
-```bash
-# Terminal 1 — API + UI
-uv run uvicorn app.main:app --reload --port 8000
-
-# Terminal 2 — LiveKit agent worker
-uv run python livekit_agent/worker.py dev
-```
-
----
-
-## Project Structure
-
-```
-.
-├── app/                          FastAPI backend
-│   ├── main.py                   All HTTP + WebSocket routes
-│   ├── config.py                 Settings (loaded from .env)
-│   ├── db.py                     SQLite schema + CRUD
-│   ├── schemas.py                Pydantic request/response models
-│   ├── ai_router.py              Picks provider per task
-│   ├── gemini_client.py          Gender detect, voice describe, image edit
-│   ├── openai_client.py          Same surface for OpenAI
-│   ├── elevenlabs_client.py      Voice design / clone / TTS / library
-│   ├── simli_client.py           Face upload, status, agent / token APIs
-│   ├── livekit_tokens.py         JWT minting + agent dispatch config
-│   └── ws.py                     UpdateHub (WebSocket fan-out)
-│
-├── livekit_agent/
-│   └── worker.py                 LiveKit agent entrypoint (per-call process)
-│
-├── static/                       Single-page studio UI
-│   ├── index.html
-│   ├── app.js
-│   ├── styles.css
-│   └── uploads/                  (gitignored) user portraits & generated frames
-│
-├── docker-compose.yml            Two-service deployment
-├── Dockerfile                    Single image shared by both services
-├── pyproject.toml                Python dependencies (uv)
-└── .env / .env.example
-```
-
----
-
-## Database Schema
-
-The application uses a single SQLite file (`app.db`, configurable via `AVATAR_DB_PATH`). Foreign key enforcement is enabled at connection time (`PRAGMA foreign_keys = ON`). All tables use `INTEGER PRIMARY KEY AUTOINCREMENT` and include a `created_at TEXT` column defaulting to `CURRENT_TIMESTAMP`.
-
-### Entity-Relationship Overview
-
-```
-persona_entities
-    │ 1
-    │ has many
-    ├──────────────► persona_avatars ──────────────────────┐
-    │                    │ 1                               │
-    │                    │ has many                        │
-    └──────────────┐     └────────────► assistants ◄───────┘
-                   │                     (persona_id FK +
-                   │                      avatar_id FK,
-                   └─────────────────────  both CASCADE DELETE)
-
-voices  (standalone — optionally linked to a persona via persona_id,
-         not a hard FK — persona can be deleted independently)
-```
-
----
+Four tables. Migrations live under `alembic/versions/` and are run against
+the per-tenant Postgres DB when the tenant is provisioned.
 
 ### `persona_entities`
 
-Stores uploaded portraits and all voice data associated with a persona.
-
-| Column | Type | Constraints | Default | Description |
-|:---|:---:|:---|:---:|:---|
-| `id` | INTEGER | PK AUTOINCREMENT | — | |
-| `name` | TEXT | NOT NULL | — | Display name |
-| `image_path` | TEXT | NOT NULL | — | Relative path to the uploaded portrait |
-| `gender` | TEXT | NOT NULL | `'unknown'` | `male` \| `female` \| `unknown` — detected by Gemini/OpenAI |
-| `status` | TEXT | NOT NULL | `'processing'` | `processing` \| `ready` \| `failed` \| `cancelled` |
-| `progress` | INTEGER | NOT NULL | `0` | Completion percentage (0–100) |
-| `stage` | TEXT | NOT NULL | `'queued'` | Human-readable pipeline stage label |
-| `last_error` | TEXT | nullable | NULL | Most recent failure message |
-| `voice_provider` | TEXT | NOT NULL | `''` | `elevenlabs` or empty |
-| `voice_id` | TEXT | NOT NULL | `''` | ElevenLabs voice identifier |
-| `voice_source` | TEXT | NOT NULL | `''` | `design` \| `clone` \| `library` |
-| `voice_description` | TEXT | NOT NULL | `''` | Natural-language description used during voice design |
-| `voice_sample_path` | TEXT | NOT NULL | `''` | Path to the uploaded clone sample |
-| `voice_preview_path` | TEXT | NOT NULL | `''` | Path to the generated preview MP3 |
-| `voice_status` | TEXT | NOT NULL | `''` | `processing` \| `ready` \| `failed` |
-| `voice_last_error` | TEXT | nullable | NULL | Most recent voice job failure message |
-| `voice_ref_id` | INTEGER | nullable | NULL | Soft link → `voices.id` (not enforced at DB level) |
-| `created_at` | TEXT | — | `CURRENT_TIMESTAMP` | ISO-8601 timestamp |
-
-> **Cascade:** deleting a `persona_entities` row cascades to `persona_avatars`, which in turn cascades to `assistants`.
-
----
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | int PK | |
+| `name` | string | display name |
+| `image_url` | text | blob URL of the source portrait |
+| `gender` | string | `male`, `female`, or `unknown` (vision-classified) |
+| `status`, `stage`, `progress`, `last_error` | string / int | background-task state |
+| `voice_provider`, `voice_id`, `voice_source` | string | currently attached voice |
+| `voice_description`, `voice_sample_url`, `voice_preview_url` | text | |
+| `voice_status`, `voice_last_error` | string | |
+| `voice_ref_id` | int? | id of the `voices` row this persona references |
+| `created_at` | timestamp | |
 
 ### `persona_avatars`
 
-One row per generated avatar variant. Stores the Simli `face_id` once registration completes.
-
-| Column | Type | Constraints | Default | Description |
-|:---|:---:|:---|:---:|:---|
-| `id` | INTEGER | PK AUTOINCREMENT | — | |
-| `persona_id` | INTEGER | NOT NULL, FK → `persona_entities(id)` ON DELETE CASCADE | — | |
-| `name` | TEXT | NOT NULL | — | Display name |
-| `decoration` | TEXT | NOT NULL | `''` | Internal decoration label |
-| `theme_prompt` | TEXT | NOT NULL | `''` | Free-text style description used for image editing |
-| `preset_ids` | TEXT | NOT NULL | `'[]'` | JSON array string of applied preset IDs |
-| `face_id` | TEXT | NOT NULL | `''` | Simli face UUID; empty until registration completes |
-| `image_path` | TEXT | NOT NULL | — | Relative path to the generated image |
-| `status` | TEXT | NOT NULL | `'processing'` | `processing` \| `ready` \| `failed` \| `cancelled` |
-| `progress` | INTEGER | NOT NULL | `0` | Completion percentage (0–100) |
-| `stage` | TEXT | NOT NULL | `'queued'` | Pipeline stage label |
-| `last_error` | TEXT | nullable | NULL | Most recent failure message |
-| `created_at` | TEXT | — | `CURRENT_TIMESTAMP` | |
-
-> **Cascade:** deleting a `persona_avatars` row cascades to `assistants`.
-
----
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | int PK | |
+| `persona_id` | int? FK → `persona_entities.id` (`ON DELETE SET NULL`) | nulls when persona deleted |
+| `name`, `decoration`, `theme_prompt`, `preset_ids` | text | |
+| `face_id` | string | Simli face id |
+| `image_url` | text | blob URL of the styled preview |
+| `status`, `stage`, `progress`, `last_error` | | |
+| `created_at` | timestamp | |
 
 ### `assistants`
 
-A callable assistant — binding a persona's voice, a specific avatar's `face_id`, and an LLM configuration.
-
-| Column | Type | Constraints | Default | Description |
-|:---|:---:|:---|:---:|:---|
-| `id` | INTEGER | PK AUTOINCREMENT | — | |
-| `name` | TEXT | NOT NULL | — | Display name |
-| `prompt` | TEXT | NOT NULL | — | LLM system prompt |
-| `first_message` | TEXT | NOT NULL | — | Opening line spoken when a call starts |
-| `persona_id` | INTEGER | NOT NULL, FK → `persona_entities(id)` ON DELETE CASCADE | — | |
-| `avatar_id` | INTEGER | NOT NULL, FK → `persona_avatars(id)` ON DELETE CASCADE | — | |
-| `face_id` | TEXT | NOT NULL | `''` | Simli face UUID — copied from the avatar at creation time |
-| `simli_agent_id` | TEXT | NOT NULL | `''` | Simli agent ID (reserved; unused in the LiveKit-mediated path) |
-| `voice_provider` | TEXT | NOT NULL | `''` | `elevenlabs` |
-| `voice_id` | TEXT | nullable | NULL | ElevenLabs voice ID — re-read from the persona on every call |
-| `voice_model` | TEXT | NOT NULL | `''` | e.g. `eleven_flash_v2_5` |
-| `language` | TEXT | NOT NULL | `'en'` | BCP-47 language code |
-| `llm_provider` | TEXT | NOT NULL | `''` | `gemini` \| `openai` |
-| `llm_model` | TEXT | NOT NULL | `''` | e.g. `gemini-3-flash-preview` |
-| `status` | TEXT | NOT NULL | `'processing'` | `processing` \| `ready` \| `failed` |
-| `progress` | INTEGER | NOT NULL | `0` | Completion percentage (0–100) |
-| `stage` | TEXT | NOT NULL | `'queued'` | Pipeline stage label |
-| `last_error` | TEXT | nullable | NULL | Most recent failure message |
-| `created_at` | TEXT | — | `CURRENT_TIMESTAMP` | |
-
-> `voice_id` is stored here for reference, but the **worker always re-reads it from the persona** at call-start. A voice change in the UI takes effect on the very next call without rebuilding the assistant.
-
----
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | int PK | |
+| `name`, `prompt`, `first_message` | text | |
+| `persona_id` | int? FK → `persona_entities.id` (`ON DELETE SET NULL`) | nulls when persona deleted |
+| `avatar_id` | int? FK → `persona_avatars.id` (`ON DELETE SET NULL`) | nulls when avatar deleted |
+| `face_id`, `simli_agent_id` | string | (`face_id` cleared when avatar deleted) |
+| `voice_provider`, `voice_id`, `voice_model`, `language` | string | |
+| `llm_provider`, `llm_model` | string | |
+| `status`, `stage`, `progress`, `last_error` | | |
+| `created_at` | timestamp | |
 
 ### `voices`
 
-Standalone voice library — designed, cloned, or imported from ElevenLabs. Optionally associated with a persona via a soft link (no FK constraint), so deleting a persona does not remove its voices.
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | int PK | |
+| `name`, `description`, `source` | string | `source` ∈ `designed` / `cloned` / `from-library` |
+| `provider`, `voice_id` | string | upstream voice id (e.g. ElevenLabs id) |
+| `sample_url`, `preview_url` | text | blob URLs |
+| `persona_id` | int? | optional link back to the persona this voice was designed from |
+| `gender` | string | |
+| `status`, `last_error` | | |
+| `created_at` | timestamp | |
 
-| Column | Type | Constraints | Default | Description |
-|:---|:---:|:---|:---:|:---|
-| `id` | INTEGER | PK AUTOINCREMENT | — | |
-| `name` | TEXT | NOT NULL | — | Display name |
-| `provider` | TEXT | NOT NULL | `'elevenlabs'` | Always `elevenlabs` currently |
-| `voice_id` | TEXT | NOT NULL | `''` | ElevenLabs voice identifier |
-| `source` | TEXT | NOT NULL | `''` | `design` \| `clone` \| `library` |
-| `description` | TEXT | NOT NULL | `''` | Natural-language voice description |
-| `sample_path` | TEXT | NOT NULL | `''` | Path to the uploaded clone sample (if cloned) |
-| `preview_path` | TEXT | NOT NULL | `''` | Path to the preview MP3 |
-| `persona_id` | INTEGER | nullable | NULL | Soft link to `persona_entities.id` (no FK constraint) |
-| `status` | TEXT | NOT NULL | `'ready'` | `processing` \| `ready` \| `failed` |
-| `last_error` | TEXT | nullable | NULL | Most recent failure message |
-| `created_at` | TEXT | — | `CURRENT_TIMESTAMP` | |
+### Delete semantics
 
----
-
-### Cascade Delete Summary
-
-| Deleted Row | Cascades To |
-|:---|:---|
-| `persona_entities` | All its `persona_avatars` rows → all `assistants` rows referencing those avatars |
-| `persona_avatars` | All `assistants` rows referencing that avatar |
-| `assistants` | Nothing (leaf table) |
-| `voices` | Nothing — `persona_entities.voice_ref_id` is a soft link, not a foreign key |
+| Delete | DB row | Linked blob | External resource | Effect on children |
+| --- | --- | --- | --- | --- |
+| Persona | yes | source image + any owned voice sample/preview | owned ElevenLabs voice | avatars + assistants survive; their `persona_id` → `NULL` |
+| Avatar | yes | preview image | Simli face | assistants survive; their `avatar_id` → `NULL`, `face_id` → `""` |
+| Voice (`voices` row) | yes | sample + preview | ElevenLabs voice | any persona pointing at it has its voice fields cleared |
+| Persona voice (`DELETE /personas/{id}/voice`) | n/a | sample + preview on the persona | ElevenLabs voice | n/a — only the persona's voice columns reset |
+| Assistant | yes | — | — | — |
 
 ---
 
-## API Reference
+## API reference
 
-Complete request/response schemas for every endpoint.
+**Contract**: `tenant_id` is **always in the request body** (JSON body field
+on JSON routes, form field on multipart routes) — **never in the URL**.
+Filters, pagination (`limit`, `offset`), and resource IDs (`{persona_id}`,
+`{avatar_id}`, …) are URL parameters; `tenant_id` is not.
 
----
+All routes return JSON unless noted. List endpoints accept `limit` (1–500,
+default 100) and `offset` (≥0, default 0) as query parameters.
 
-### Data Models
+### Meta
 
-The following Pydantic models are reused across multiple endpoints.
+#### `GET /health`
+- **Body**: —
+- **Resp**: `{ status: "ok" }`
+- **UI use**: liveness probe.
 
-#### `PersonaAvatar`
+#### `GET /config`
+- **Body**: —
+- **Resp**: `{ livekit_url, has_livekit_creds, has_simli_api_key, has_keyvault_creds: bool }`
+- **UI use**: sanity check that the API has its dependencies wired before showing the "start call" button.
 
-```jsonc
-{
-  "id": 1,                          // int
-  "persona_id": 1,                  // int
-  "name": "My Avatar",              // str
-  "decoration": "",                 // str
-  "theme_prompt": "",               // str
-  "preset_ids": ["preset_id"],      // list[str]
-  "face_id": "simli-face-uuid",     // str
-  "image_path": "uploads/img.png",  // str
-  "status": "ready",                // str: queued | processing | ready | failed
-  "progress": 100,                  // int 0–100
-  "stage": "done",                  // str
-  "last_error": null                // str | null
-}
-```
-
-#### `PersonaEntity`
-
-```jsonc
-{
-  "id": 1,
-  "name": "Lili",
-  "image_path": "uploads/portrait.png",
-  "gender": "female",               // str: male | female | unknown
-  "status": "ready",
-  "progress": 100,
-  "stage": "done",
-  "last_error": null,
-  "voice_provider": "elevenlabs",   // str
-  "voice_id": "el-voice-id",        // str
-  "voice_source": "design",         // str: design | clone | library
-  "voice_description": "Warm ...",  // str
-  "voice_sample_path": "",          // str
-  "voice_preview_path": "uploads/preview.mp3",
-  "voice_status": "ready",          // str
-  "voice_last_error": null,
-  "avatars": [ /* PersonaAvatar[] */ ]
-}
-```
-
-#### `VoiceEntity`
-
-```jsonc
-{
-  "id": 1,
-  "name": "Sarah Clone",
-  "provider": "elevenlabs",         // str
-  "voice_id": "el-voice-id",        // str
-  "source": "clone",                // str: design | clone | library
-  "description": "Clear, warm...",  // str
-  "sample_path": "",                // str
-  "preview_path": "uploads/v.mp3",  // str
-  "persona_id": null,               // int | null
-  "status": "ready",                // str: processing | ready | failed
-  "last_error": null,
-  "created_at": "2024-01-01T00:00:00"
-}
-```
-
-#### `Assistant`
-
-```jsonc
-{
-  "id": 1,
-  "name": "Lili Assistant",
-  "prompt": "You are Lili...",       // str — system prompt
-  "first_message": "Hi, how can I help?",
-  "persona_id": 1,
-  "avatar_id": 2,
-  "face_id": "simli-face-uuid",
-  "simli_agent_id": "",             // str
-  "voice_provider": "elevenlabs",
-  "voice_id": "el-voice-id",        // str | null
-  "voice_model": "eleven_flash_v2_5",
-  "language": "en",
-  "llm_provider": "gemini",
-  "llm_model": "gemini-3-flash-preview",
-  "status": "ready",
-  "progress": 100,
-  "stage": "done",
-  "last_error": null
-}
-```
-
-#### `AssistantCallResponse`
-
-```jsonc
-{
-  "assistant_id": 1,
-  "assistant_name": "Lili Assistant",
-  "room_name": "room-uuid",
-  "livekit_url": "wss://project.livekit.cloud",
-  "participant_token": "<livekit-jwt>",
-  "participant_identity": "user-uuid"
-}
-```
-
----
-
-### System Endpoints
-
-#### `GET /api/health`
-
-Health check.
-
-**Response `200`**
-```json
-{ "status": "ok" }
-```
-
----
-
-#### `GET /api/config`
-
-Client bootstrap configuration. Safe to expose — contains no secret values.
-
-**Response `200`**
-```jsonc
-{
-  "livekit_url": "wss://project.livekit.cloud",
-  "has_livekit_creds": true,
-  "has_simli_api_key": true,
-  "simli_widget_script": "https://cdn.simli.ai/..."
-}
-```
-
----
-
-#### `GET /api/studio/presets`
-
-Returns all available avatar theme presets and voice presets.
-
-**Response `200`**
-```jsonc
-{
-  "avatar_presets": [
-    {
-      "id": "corporate_female",
-      "label": "Corporate Female",
-      "cat": "industry",
-      "gender": "female"
-    }
-    // ...
-  ],
-  "voice_presets": [
-    { "id": "warm_narrator", "label": "Warm Narrator" }
-    // ...
-  ]
-}
-```
-
----
+#### `GET /presets`
+- **Body**: —
+- **Resp**: `{ avatar_presets: ThemePreset[], voice_presets: ThemePreset[] }`
+- **UI use**: populates the style/preset chip rows for avatar and voice design.
 
 ### Personas
 
-#### `GET /api/studio/personas`
+#### `POST /personas`
+- **Body** (multipart): `persona_image` (file), `name` (string), `tenant_id` (string)
+- **Resp**: `PersonaEntity` with `status: "processing"`, `stage: "detecting_gender"`
+- **UI use**: create-persona form. After save, poll `POST /personas/{id}/status` until `status ∈ {ready, failed}`.
 
-Returns all personas with their nested avatars.
+#### `POST /personas/list`
+- **Body**: `{ tenant_id }`
+- **Query**: `gender`, `status`, `voice_status`, `voice_provider` (all optional); `limit`, `offset`
+- **Resp**: `PersonaEntity[]` (each row includes its `avatars`)
+- **UI use**: left-pane "Personas" panel.
 
-**Response `200`** — `PersonaEntity[]`
+#### `POST /personas/{id}/get`
+- **Body**: `{ tenant_id }`
+- **Resp**: `PersonaEntity`
+- **UI use**: refresh a single persona card without a full list refetch.
 
----
+#### `POST /personas/{id}/status`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status, stage, progress, last_error }`
+- **UI use**: poll while persona creation is in flight (gender detection + voice description generation).
 
-#### `POST /api/studio/personas`
+#### `POST /personas/{id}/cascade-count`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ avatars: int, assistants: int }`
+- **UI use**: delete-confirmation modal — "Will leave X avatars and Y assistants orphaned."
 
-Creates a persona from an uploaded portrait.
+#### `POST /personas/{id}/cancel`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status: "cancelled" }`
+- **UI use**: "Cancel" button on a still-processing persona.
 
-**Request** — `multipart/form-data`
+#### `PATCH /personas/{id}`
+- **Body**: `{ tenant_id, name?, voice_ref_id? | null, ... }` — any column subset
+- **Resp**: `PersonaEntity`
+- **UI use**: rename a persona; attach/detach a standalone voice via `voice_ref_id`.
 
-| Field | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `persona_image` | file | Yes | PNG / JPG / WEBP |
-| `name` | string | No | Default: `"Persona"` |
-| `client_id` | string | No | WebSocket client ID for progress events |
+#### `DELETE /personas/{id}`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ deleted: int }`
+- **UI use**: persona delete confirmation. See [Delete semantics](#delete-semantics).
 
-**Response `201`** — `PersonaEntity`
+#### `POST /personas/{id}/voice/design`
+- **Body**: `{ tenant_id, user_prompt?, name?, gender? }` — `gender` ∈ `male` / `female` / `null`; defaults to persona's detected gender
+- **Resp**: `PersonaEntity` with `voice_status: "processing"`
+- **UI use**: "Design a voice from this persona" — kicks off the ElevenLabs Voice Design background task.
 
-**Error Responses**
-- `400` — unsupported image format
+#### `POST /personas/{id}/voice/clone`
+- **Body** (multipart): `voice_sample` (audio file), `name?`, `tenant_id`
+- **Resp**: `PersonaEntity` with `voice_status: "processing"`
+- **UI use**: "Clone this user's voice" — uploads a 30-90s sample, ElevenLabs returns a voice_id; Gemini analyses the audio for gender.
 
----
-
-#### `PATCH /api/studio/personas/{persona_id}`
-
-Renames a persona or updates its linked voice. Changing `voice_ref_id` propagates the new voice to every associated assistant.
-
-**Request** — `application/json`
-```jsonc
-{
-  "name": "New Name",               // str (optional)
-  "voice_ref_id": 3                 // int | null (optional) — links a VoiceEntity
-}
-```
-
-**Response `200`** — `PersonaEntity`
-
-**Error Responses**
-- `404` — persona not found
-
----
-
-#### `DELETE /api/studio/personas/{persona_id}`
-
-Deletes a persona and cascade-deletes all associated avatars and assistants.
-
-**Response `200`**
-```json
-{ "deleted": 1 }
-```
-
----
-
-#### `GET /api/studio/personas/{persona_id}/cascade-count`
-
-Returns the number of records that will be deleted — use to confirm before a destructive operation.
-
-**Response `200`**
-```json
-{ "avatars": 2, "assistants": 1 }
-```
-
----
-
-#### `POST /api/studio/personas/{persona_id}/cancel`
-
-Cancels an in-progress persona creation job.
-
-**Response `200`**
-```json
-{ "status": "cancelled" }
-```
-
----
-
-#### `POST /api/studio/personas/{persona_id}/voice/design`
-
-Triggers AI voice design for a persona. Gemini analyses the portrait and describes an ideal voice; ElevenLabs Voice Design then generates candidates.
-
-**Request** — `application/json`
-```jsonc
-{
-  "user_prompt": "Warm, professional tone",  // str, max 500 chars (optional)
-  "name": "My Voice",                        // str, max 100 chars (optional)
-  "client_id": "ws-client-id"               // str | null (optional)
-}
-```
-
-**Response `200`** — `PersonaEntity` (with updated voice fields)
-
-**Error Responses**
-- `404` — persona not found
-- `409` — voice design already in progress
-
----
-
-#### `POST /api/studio/personas/{persona_id}/voice/clone`
-
-Clones a voice from an uploaded audio sample and attaches it to a persona.
-
-**Request** — `multipart/form-data`
-
-| Field | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `voice_sample` | file | Yes | Audio file, max 20 MB |
-| `name` | string | No | Voice display name |
-| `client_id` | string | No | WebSocket client ID |
-
-**Response `200`** — `PersonaEntity` (with updated voice fields)
-
-**Error Responses**
-- `400` — file exceeds 20 MB limit
-- `404` — persona not found
-
----
-
-#### `DELETE /api/studio/personas/{persona_id}/voice`
-
-Unlinks and deletes the voice attached to a persona.
-
-**Response `200`** — `PersonaEntity` (voice fields cleared)
-
----
+#### `DELETE /personas/{id}/voice`
+- **Body**: `{ tenant_id }`
+- **Resp**: `PersonaEntity` (voice fields cleared)
+- **UI use**: "Detach voice" button on a persona. Drops the ElevenLabs voice + blob audio + clears the columns.
 
 ### Avatars
 
-#### `POST /api/studio/avatars/preview`
+#### `POST /avatars/preview`
+- **Body** (multipart): `persona_id`, `name`, `theme_prompt?`, `preset_ids?` (JSON array), `draft_avatar_id?`, `tenant_id`
+- **Resp**: `{ avatar_id: int }` — preview is generated synchronously
+- **UI use**: "Generate preview" in the avatar wizard. Returned `avatar_id` is a draft; subsequent calls reuse it.
 
-Generates an AI-edited avatar image without registering it with Simli. Use this endpoint to iterate on styles before committing.
+#### `POST /avatars`
+- **Body** (multipart): `persona_id`, `draft_avatar_id`, `name`, `theme_prompt?`, `preset_ids?`, `tenant_id`
+- **Resp**: `PersonaAvatar` with `status: "processing"`, `stage: "uploading"`
+- **UI use**: "Save avatar" — locks the preview into a persistent avatar and starts the Simli face-upload background task.
 
-**Request** — `multipart/form-data`
+#### `POST /avatars/list`
+- **Body**: `{ tenant_id }`
+- **Query**: `persona_id`, `gender`, `voice_id`, `status` (optional); `limit`, `offset`
+- **Resp**: `PersonaAvatar[]`
+- **UI use**: avatars panel on a persona card.
 
-| Field | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `persona_id` | int | Yes | Source persona |
-| `name` | string | Yes | Display name |
-| `theme_prompt` | string | No | Free-text style description |
-| `preset_ids` | string | No | JSON array string, e.g. `'["corporate_female"]'` |
-| `custom_prompt` | string | No | Additional free-form instruction |
-| `client_id` | string | No | WebSocket client ID |
+#### `POST /avatars/{id}/get`
+- **Body**: `{ tenant_id }`
+- **Resp**: `PersonaAvatar`
+- **UI use**: single-card refresh.
 
-**Response `200`**
-```json
-{ "avatar_id": 7 }
-```
+#### `POST /avatars/{id}/status`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status, stage, progress, last_error }`
+- **UI use**: poll the Simli upload pipeline (uploading → polling_simli → ready).
 
-The WebSocket broadcasts `avatar.preview_ready` with `preview_path` once the image is ready.
+#### `POST /avatars/{id}/cascade-count`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ assistants: int }`
+- **UI use**: delete-confirmation modal — "Will leave X assistants orphaned."
 
----
+#### `POST /avatars/{id}/cancel`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status: "cancelled" }`
+- **UI use**: cancel an in-flight Simli upload.
 
-#### `POST /api/studio/avatars`
+#### `POST /avatars/{id}/retry`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status: "retrying" }`
+- **UI use**: retry a failed avatar build (regenerates image if needed, re-uploads to Simli).
 
-Commits a draft avatar and registers it with Simli to obtain a `face_id`.
-
-**Request** — `multipart/form-data`
-
-| Field | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `persona_id` | int | Yes | |
-| `name` | string | Yes | |
-| `decoration` | string | No | |
-| `theme_prompt` | string | No | |
-| `preset_ids` | string | No | JSON array string |
-| `draft_avatar_id` | int | No | Re-use an existing preview |
-| `client_id` | string | No | WebSocket client ID |
-
-**Response `201`** — `PersonaAvatar`
-
-The WebSocket broadcasts `avatar.uploading` → `avatar.queued` → `avatar.ready` (or `avatar.failed`).
-
----
-
-#### `GET /api/studio/avatars/{avatar_id}/cascade-count`
-
-Returns the number of records that will be deleted upon avatar removal.
-
-**Response `200`**
-```json
-{ "assistants": 1 }
-```
-
----
-
-#### `DELETE /api/studio/avatars/{avatar_id}`
-
-Deletes an avatar and its associated assistants. Unregisters the face from Simli if it was previously registered.
-
-**Response `200`**
-```json
-{ "deleted": 1 }
-```
-
----
-
-#### `POST /api/studio/avatars/{avatar_id}/retry`
-
-Re-runs a failed Simli upload for an avatar.
-
-**Query Parameters**
-
-| Parameter | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `client_id` | string | No | WebSocket client ID |
-
-**Response `200`**
-```json
-{ "status": "retrying" }
-```
-
----
-
-#### `POST /api/studio/avatars/{avatar_id}/cancel`
-
-Cancels an in-progress avatar generation or Simli upload.
-
-**Response `200`**
-```json
-{ "status": "cancelled" }
-```
-
----
+#### `DELETE /avatars/{id}`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ deleted: int }`
+- **UI use**: avatar delete. See [Delete semantics](#delete-semantics).
 
 ### Voices
 
-#### `GET /api/studio/voices`
+#### `POST /voices/design`
+- **Body** (multipart): `name`, `description?`, `voice_preset_id?`, `persona_id?`, `include_persona_traits?`, `gender?`, `tenant_id`
+- **Resp**: `VoiceEntity` with `status: "processing"`
+- **UI use**: "Design from prompt" tab — kicks off ElevenLabs Voice Design. Final gender = explicit input → linked persona's gender → `unknown`.
 
-Returns all user-created voices (designed, cloned, or added from the library).
+#### `POST /voices/clone`
+- **Body** (multipart): `voice_sample` (audio), `name`, `description?`, `persona_id?`, `tenant_id`
+- **Resp**: `VoiceEntity` with `status: "processing"`
+- **UI use**: "Clone from upload" tab. Gemini detects gender; ElevenLabs receives the gender label too.
 
-**Response `200`** — `VoiceEntity[]`
+#### `POST /voices/list`
+- **Body**: `{ tenant_id }`
+- **Query**: `gender`, `source`, `provider`, `status`, `persona_id` (optional); `limit`, `offset`
+- **Resp**: `VoiceEntity[]`
+- **UI use**: "Voices" panel in the sidebar.
 
----
+#### `POST /voices/{id}/get`
+- **Body**: `{ tenant_id }`
+- **Resp**: `VoiceEntity`
+- **UI use**: single-row refresh.
 
-#### `POST /api/studio/voices/design`
+#### `POST /voices/{id}/status`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status, stage, progress, last_error }` (stage/progress null for voices)
+- **UI use**: poll while design/clone is in flight.
 
-Designs a new standalone voice from a text description (not tied to a specific persona).
+#### `POST /voices/library`
+- **Body**: `{ tenant_id }`
+- **Resp**: `LibraryVoice[]` — `{ voice_id, name, preview_url, category, labels }`
+- **UI use**: "Pick from library" tab — ElevenLabs's premade catalogue (cached 5 min server-side).
 
-**Request** — `multipart/form-data`
+#### `POST /voices/from-library`
+- **Body**: `{ tenant_id, voice_id, name, preview_url }`
+- **Resp**: `VoiceEntity` with `status: "ready"`
+- **UI use**: clicking a library entry imports it as a standalone voice row.
 
-| Field | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `name` | string | Yes | Display name |
-| `description` | string | No | Natural-language voice description |
-| `voice_preset_id` | string | No | ID from `GET /api/studio/presets` |
-| `persona_id` | int | No | If provided, Gemini auto-generates the description from the portrait |
-| `include_persona_traits` | bool | No | Default `false` |
-| `client_id` | string | No | WebSocket client ID |
+#### `POST /voices/preview-default`
+- **Body**: `{ tenant_id }`
+- **Resp**: MP3 bytes (`Content-Type: audio/mpeg`)
+- **UI use**: play the env-configured default voice. Fetch as a blob → `URL.createObjectURL` → set as `<audio src>`.
 
-**Response `201`** — `VoiceEntity`
+#### `POST /voices/suggest-description`
+- **Body**: `{ tenant_id, user_prompt? }`
+- **Resp**: `{ description: string }`
+- **UI use**: "Suggest" button on the design form — Gemini produces a voice-design brief from an optional user hint.
 
----
+#### `POST /voices/{id}/retry`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status: "retrying" }`
+- **UI use**: retry a failed design or clone job.
 
-#### `POST /api/studio/voices/clone`
-
-Clones a voice from an audio sample as a standalone voice.
-
-**Request** — `multipart/form-data`
-
-| Field | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `voice_sample` | file | Yes | Audio file, max 20 MB |
-| `name` | string | No | Display name |
-| `client_id` | string | No | WebSocket client ID |
-
-**Response `201`** — `VoiceEntity`
-
-**Error Responses**
-- `400` — file exceeds 20 MB limit
-
----
-
-#### `POST /api/studio/voices/suggest-description`
-
-Uses Gemini to suggest a voice description based on a persona's portrait. Intended for pre-filling the voice design form.
-
-**Request** — `application/json`
-```jsonc
-{
-  "persona_id": 1,        // int — required
-  "user_hint": "upbeat"   // str — optional additional guidance
-}
-```
-
-**Response `200`**
-```json
-{ "description": "A warm, confident female voice with a slight mid-Atlantic accent..." }
-```
-
----
-
-#### `GET /api/studio/voices/library`
-
-Browses the ElevenLabs public Voice Library.
-
-**Response `200`**
-```jsonc
-[
-  {
-    "voice_id": "el-voice-id",
-    "name": "Rachel",
-    "preview_url": "https://...",
-    "category": "premade",
-    "labels": { "accent": "american", "gender": "female" }
-  }
-  // ...
-]
-```
-
----
-
-#### `POST /api/studio/voices/from-library`
-
-Adds an ElevenLabs library voice to the studio.
-
-**Request** — `application/json`
-```jsonc
-{
-  "voice_id": "el-voice-id",       // str — required
-  "name": "Rachel",                // str — required
-  "preview_url": "https://..."     // str — required
-}
-```
-
-**Response `201`** — `VoiceEntity`
-
----
-
-#### `GET /api/studio/voices/preview-default`
-
-Streams the default voice preview MP3. Used as a fallback when no custom preview exists.
-
-**Response `200`** — `audio/mpeg` binary stream
-
----
-
-#### `DELETE /api/studio/voices/{voice_id}`
-
-Deletes a voice from the studio. Also removes it from ElevenLabs if it was designed or cloned.
-
-**Response `200`**
-```json
-{ "deleted": 1 }
-```
-
----
-
-#### `POST /api/studio/voices/{voice_id}/retry`
-
-Retries a failed voice design or clone job.
-
-**Query Parameters**
-
-| Parameter | Type | Required | Notes |
-|:---|:---:|:---:|:---|
-| `client_id` | string | No | WebSocket client ID |
-
-**Response `200`**
-```json
-{ "status": "retrying" }
-```
-
----
+#### `DELETE /voices/{id}`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ deleted: int }`
+- **UI use**: voice delete. See [Delete semantics](#delete-semantics).
 
 ### Assistants
 
-#### `GET /api/studio/assistants`
+#### `POST /assistants`
+- **Body**: `{ tenant_id, name, prompt, first_message, persona_id, avatar_id, llm_provider?, llm_model? }`
+- **Resp**: `Assistant` with `status: "processing"`
+- **UI use**: "Create assistant" wizard — combines a persona, an avatar, and a system prompt.
 
-Returns all assistants.
+#### `POST /assistants/list`
+- **Body**: `{ tenant_id }`
+- **Query**: `persona_id`, `avatar_id`, `voice_id`, `llm_provider`, `status` (optional); `limit`, `offset`
+- **Resp**: `Assistant[]`
+- **UI use**: assistants panel.
 
-**Response `200`** — `Assistant[]`
+#### `POST /assistants/{id}/get`
+- **Body**: `{ tenant_id }`
+- **Resp**: `Assistant`
+- **UI use**: single-card refresh.
+
+#### `POST /assistants/{id}/status`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ status, stage, progress, last_error }`
+- **UI use**: poll while the LiveKit agent is being prepared.
+
+#### `DELETE /assistants/{id}`
+- **Body**: `{ tenant_id }`
+- **Resp**: `{ deleted: int }`
+- **UI use**: assistant delete. No external resources are owned directly — the row is dropped.
+
+### Call
+
+#### `POST /calls`
+- **Body**: `{ tenant_id, assistant_id }`
+- **Resp** (single plug-and-play payload):
+
+  ```jsonc
+  {
+    "livekit":   { "url": "wss://…", "token": "eyJ…", "room": "…", "identity": "…" },
+    "assistant": { "id": 42, "name": "Maya", "first_message": "Hi…" },
+    "avatar":    { "id": 7,  "face_id": "simli_xxx", "image_url": "https://…" },
+    "voice":     { "provider": "elevenlabs", "voice_id": "21m00…", "name": "Rachel", "preview_url": "https://…" }
+  }
+  ```
+
+- **UI use**: pressing the "Call" button on an assistant. Use `livekit.url` + `livekit.token` to join the room; the agent worker on the backend connects in parallel and publishes the lip-synced avatar video + voice audio. The other fields are display metadata for the call shell.
+
+### Local-blob (local fallback only)
+
+#### `GET /local-blob/{tenant_id}/{key:path}`
+- **Body**: —
+- **Resp**: raw bytes of the file at `LOCAL_DATA_DIR/{tenant_id}/blob/{key}`
+- **UI use**: served as the value of `image_url` / `sample_url` etc. when running against `LOCAL_TENANT_ID`. In production (Azure) the URLs point directly at the blob endpoint and don't need this route.
 
 ---
 
-#### `POST /api/studio/assistants`
+## Polling pattern
 
-Creates an assistant by binding a persona, avatar, and LLM configuration.
+There is no WebSocket. Background-task progress is exposed via per-resource
+`*/status` routes. Poll every ~3 s until `status ∈ {ready, failed, cancelled}`.
 
-**Request** — `application/json`
-```jsonc
-{
-  "name": "Lili Assistant",         // str, 1–100 chars — required
-  "prompt": "You are Lili...",      // str, min 1 char — required (system prompt)
-  "first_message": "Hi, how can I help?",  // str (optional, has default)
-  "persona_id": 1,                  // int — required
-  "avatar_id": 2,                   // int — required
-  "llm_provider": "gemini",         // str | null — falls back to env default
-  "llm_model": "gemini-3-flash-preview",  // str | null — falls back to env default
-  "client_id": "ws-client-id"      // str | null (optional)
-}
-```
-
-**Response `201`** — `Assistant`
-
-**Error Responses**
-- `404` — persona or avatar not found
-- `400` — avatar has no registered `face_id` yet
-
----
-
-#### `DELETE /api/studio/assistants/{assistant_id}`
-
-Deletes an assistant.
-
-**Response `200`**
-```json
-{ "deleted": 1 }
-```
-
----
-
-### Calls
-
-#### `POST /api/studio/calls`
-
-Initiates a live video call with an assistant. Creates a LiveKit room, dispatches the agent worker, and returns a browser join token.
-
-**Request** — `application/json`
-```jsonc
-{
-  "assistant_id": 1   // int — required
-}
-```
-
-**Response `200`** — `AssistantCallResponse`
-```jsonc
-{
-  "assistant_id": 1,
-  "assistant_name": "Lili Assistant",
-  "room_name": "room-uuid",
-  "livekit_url": "wss://project.livekit.cloud",
-  "participant_token": "<livekit-jwt>",
-  "participant_identity": "user-uuid"
-}
-```
-
-The browser connects using:
 ```js
-room.connect(livekit_url, participant_token)
-```
-
-**Error Responses**
-- `404` — assistant not found
-- `400` — assistant is not in the `ready` state
-
----
-
-### Infrastructure Endpoints
-
-#### `POST /api/simli/session-token`
-
-Mints a Simli session token for use by the browser Simli widget.
-
-**Request** — `application/json`
-```jsonc
-{
-  "create_transcript": true,   // bool (default: true)
-  "expiry_stamp": -1           // int (default: -1 = no expiry)
-}
-```
-
-**Response `200`** — Simli session token response (pass-through from the Simli API)
-
----
-
-#### `POST /api/livekit/token`
-
-Mints a custom LiveKit participant token.
-
-**Request** — `application/json`
-```jsonc
-{
-  "room_name": "my-room",         // str, 1–128 chars — required
-  "identity": "user-123",         // str, 1–128 chars — required
-  "participant_name": "Alice"     // str | null (optional)
-}
-```
-
-**Response `200`**
-```jsonc
-{
-  "token": "<livekit-jwt>",
-  "livekit_url": "wss://project.livekit.cloud",
-  "room_name": "my-room",
-  "identity": "user-123"
+async function pollUntilDone(resource, id, tenant_id) {
+  for (;;) {
+    const r = await fetch(`/${resource}/${id}/status`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ tenant_id }),
+    });
+    const s = await r.json();
+    if (s.status !== "processing") return s;
+    await new Promise(r => setTimeout(r, 3000));
+  }
 }
 ```
 
 ---
 
-#### `POST /api/simli/cleanup`
+## Calling from a browser
 
-Purges all Simli agents, faces, and local database records.
+Minimal vanilla HTML that joins an assistant call using `livekit-client`:
 
-> **Warning:** This operation is destructive and irreversible. Use with care.
+```html
+<!doctype html>
+<video id="v" autoplay playsinline></video>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script>
+async function startCall(assistantId) {
+  const r = await fetch("/calls", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ tenant_id: "local_tenant", assistant_id: assistantId }),
+  });
+  const data = await r.json();
 
-**Response `200`**
-```jsonc
-{
-  "deleted_agents": 3,
-  "deleted_faces": 5,
-  "local_assistants_deleted": 3,
-  "local_avatars_deleted": 5,
-  "local_personas_deleted": 2,
-  "local_uploads_deleted": 10,
-  "errors": []
+  const { Room, RoomEvent } = window.LivekitClient;
+  const room = new Room({ adaptiveStream: true });
+  room.on(RoomEvent.TrackSubscribed, (track, pub) => {
+    if (track.kind === "video") track.attach(document.getElementById("v"));
+    else if (track.kind === "audio") track.attach();
+  });
+  await room.connect(data.livekit.url, data.livekit.token);
+  await room.localParticipant.setMicrophoneEnabled(true);
 }
+</script>
 ```
 
----
-
-### WebSocket
-
-#### `WS /ws/updates/{client_id}`
-
-Connect using any unique `client_id` string. The server fans out progress events as JSON frames.
-
-**Event Envelope**
-```jsonc
-{
-  "event": "<event-name>",
-  // ...event-specific fields
-}
-```
-
-**Persona Events**
-
-| Event | Key Fields |
-|:---|:---|
-| `persona.queued` | `id`, `status` |
-| `persona.ready` | `id`, `status`, `gender` |
-| `persona.deleted` | `id` |
-| `persona.cancelled` | `id` |
-| `persona.voice` | `id`, `voice_status`, `voice_id`, `voice_preview_path` |
-| `persona.voice_delete` | `id` |
-
-**Avatar Events**
-
-| Event | Key Fields |
-|:---|:---|
-| `avatar.generating` | `id`, `persona_id`, `progress`, `stage` |
-| `avatar.preview_ready` | `id`, `persona_id`, `preview_path` |
-| `avatar.uploading` | `id`, `persona_id`, `stage` |
-| `avatar.queued` | `id`, `persona_id`, `face_id` |
-| `avatar.ready` | `id`, `persona_id`, `face_id`, `status` |
-| `avatar.failed` | `id`, `persona_id`, `last_error` |
-| `avatar.deleted` | `id`, `persona_id` |
-| `avatar.cancelled` | `id`, `persona_id` |
-| `avatar.retrying` | `id`, `persona_id` |
-
-**Voice Events**
-
-| Event | Key Fields |
-|:---|:---|
-| `voice.status` | `id`, `status`, `progress`, `stage` |
-| `voice.done` | `id`, `status`, `voice_id`, `preview_path` |
-| `voice.deleted` | `id` |
-| `voice.retrying` | `id` |
-
-**Assistant & Miscellaneous Events**
-
-| Event | Key Fields |
-|:---|:---|
-| `assistant.ready` | `id`, `status` |
-| `assistant.deleted` | `id` |
-| `simli.status` | `avatar_id`, `stage`, `progress` |
-| `api.uploading` | `label` |
-
----
-
-## How Calls Work Under the Hood
-
-The most nuanced component is the **TTS → Simli → browser** audio-video pipeline. The following sequence describes what happens for a single spoken sentence:
-
-```
-1. User speaks                        ──► Browser publishes mic to LiveKit room
-2. Worker subscribes to user audio    ──► Deepgram STT streams partial transcripts
-3. Final transcript                   ──► Gemini LLM generates a reply (token stream)
-4. Reply tokens                       ──► ElevenLabs TTS (Flash v2.5, streaming PCM)
-5. Agent.output.audio                 ──► DataStreamAudioOutput
-                                            • resamples to 16 kHz
-                                            • LiveKit data channel → simli-avatar-agent
-6. Simli render server                ──► generates face video locked to PCM
-                                            • re-publishes audio + video tracks
-7. Browser <video> element receives   ──► both tracks attached to ONE element
-                                            so the browser locks them to one
-                                            media clock (perfect AV sync)
-```
-
-**Three implementation details that required careful engineering:**
-
-- **Voice freshness on every call.** The worker reads the voice configuration from the **persona** (not the assistant snapshot), so a voice change in the UI is reflected on the very next call without requiring an assistant rebuild.
-
-- **Simli rate-limit recovery.** `avatar.start()` silently swallows HTTP 429 responses. The implementation wraps the call in a 3× retry loop that polls `room.remote_participants` for the `simli-avatar-agent` identity to confirm the connection, rather than trusting the silent return value.
-
-- **AV sync without re-encoding.** Both Simli's audio and video tracks are attached to the *same* `<video>` element. LiveKit's `track.attach()` accumulates tracks into one `MediaStream`, and the browser maintains them on a single media clock — the only reliable way to guarantee synchronisation without re-encoding.
-
-> **Note:** This implementation uses the LiveKit-mediated Simli pattern (per LiveKit's documentation). It provides full provider flexibility (any STT/LLM/TTS combination) at the cost of a few additional hops. For ultra-low-latency sync, the **Simli Auto** mode (direct browser ↔ Simli WebRTC) is available — `app/simli_client.py` already exposes `create_auto_session_token` for that path.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Resolution |
-|:---|:---|:---|
-| Call shows "Connecting…" indefinitely | Simli `avatar.start()` received a 429 (rate limit) | Wait briefly; the worker auto-retries 3×. Check `docker compose logs avatar-agent-worker` for `failed to connect to simli`. |
-| Audio plays but no avatar video | Simli session token failed to mint | Verify `SIMLI_API_KEY` is valid and that the assistant's `face_id` status is `ready` (not `processing`). |
-| Audio and video are out of sync | Browser cached a stale `app.js` | Hard-refresh the page (`Cmd+Shift+R`). The cache-buster in `index.html` should prevent this in most cases. |
-| Voice in call is incorrect (always Sarah) | Stale assistant row | This is resolved — the worker now reads the voice from the persona. If the issue persists, restart the worker container. |
-| `Gemini image edit failed (400)` | `responseModalities` includes `TEXT` | Pull the latest version — the value must be `["IMAGE"]` only for `gemini-3.1-flash-image-preview`. |
-| Simli face upload SSL error | Transient TLS failure from `api.simli.ai` | Auto-retried (3× with backoff). If the error persists, check the [Simli status page](https://simli.com). |
-
----
-
-## Credits
-
-Built by **Sagar Deka**.
-
-Powered by [LiveKit](https://livekit.io) · [Simli](https://simli.com) · [ElevenLabs](https://elevenlabs.io) · [Gemini](https://ai.google.dev) · [Deepgram](https://deepgram.com) · [OpenAI](https://openai.com)
+A complete reference implementation (persona create flow, avatar wizard,
+voice design/clone, assistant builder, call shell) is mounted at `/demo` —
+all of it built on the routes above with `tenant_id` hardcoded to
+`local_tenant`. Source under [app/demo_static/](app/demo_static/).

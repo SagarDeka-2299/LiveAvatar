@@ -1,5 +1,5 @@
 /* ── Constants ── */
-const PLACEHOLDER="/static/avatar-placeholder.svg";
+const PLACEHOLDER="/demo/avatar-placeholder.svg";
 const CROP_W=1024,CROP_H=576,CROP_RATIO=16/9;
 
 let PRESETS=[];
@@ -34,25 +34,25 @@ function _ensureTick(){
   })();
 }
 let cropper=null,sourceFile=null,sourceUrl="",croppedBlob=null,croppedUrl="";
-let ws=null,wsTimer=null,studioTimer=null;
+let pollTimer=null;
 let lkRoom=null,_pendingDelete=null;
 
-const clientId=(()=>{let id=localStorage.getItem("lili-cid");if(!id){id=crypto.randomUUID();localStorage.setItem("lili-cid",id);}return id;})();
 const $=id=>document.getElementById(id);
 
 function esc(s){return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 function setStatus(el,msg,type=""){if(!el)return;el.textContent=msg;el.className="status-msg"+(type?" "+type:"");}
 function setThumb(el,path){if(!el)return;el.style.backgroundImage=`url("${(path||PLACEHOLDER).replace(/"/g,"%22")}")`;}
 function revoke(url){if(url)URL.revokeObjectURL(url);}
-async function api(path,init={}){
-  const isForm=init.body instanceof FormData;
-  const h={...(init.headers||{})};
-  if(!isForm&&!h["Content-Type"])h["Content-Type"]="application/json";
-  const res=await fetch(path,{...init,headers:h});
-  let data={};try{data=JSON.parse(await res.text());}catch{}
-  if(!res.ok)throw new Error(data.detail||data.error||"Request failed");
-  return data;
-}
+/* Demo runs against the local-tenant fallback. Hard-coded for simplicity —
+   this file is a reference for front-end developers wiring up against the
+   real API. Swap the constant out (or read it from your auth layer) to
+   point at a real tenant.
+
+   IMPORTANT: tenant_id is ALWAYS in the request body — JSON body field
+   for JSON routes, multipart form field for file uploads. Never on the
+   URL. Filters and pagination (limit, offset) DO go on the URL as
+   query parameters. See README for the full contract. */
+const TENANT_ID="local_tenant";
 
 /* ── Presets ── */
 function renderPresetUI(catsEl,chipsEl,selArr,cat,gender,onToggle,onCat){
@@ -97,17 +97,27 @@ const getVoice=id=>voices.find(v=>v.id===(id??selectedVoiceId))||null;
 
 /* ── Voice playback ── */
 function playVoicePreview(voice){
-  if(!voice?.preview_path){alert("No preview audio available for this voice yet.");return;}
+  if(!voice?.preview_url){alert("No preview audio available for this voice yet.");return;}
   const el=$("voice-preview-audio");if(!el)return;
-  el.src=voice.preview_path;
+  el.src=voice.preview_url;
   el.play().catch(()=>{});
 }
-function playDefaultVoicePreview(){
+async function playDefaultVoicePreview(){
   const el=$("voice-preview-audio");if(!el)return;
   const defaultVoiceId="EXAVITQu4vr4xnSDxMaL";
   const lib=libraryVoices.find(v=>v.voice_id===defaultVoiceId);
-  if(lib?.preview_url){el.src=lib.preview_url;}
-  else{el.src="/api/studio/voices/preview-default";}
+  if(lib?.preview_url){
+    el.src=lib.preview_url;
+  }else{
+    // /voices/preview-default is POST with a JSON body now — can't be used
+    // directly as an <audio> src. Fetch the bytes, wrap in a blob URL.
+    try{
+      const _r=await fetch("/voices/preview-default",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      if(!_r.ok)throw new Error("no default preview");
+      const blob=await _r.blob();
+      el.src=URL.createObjectURL(blob);
+    }catch{return;}
+  }
   el.play().catch(()=>{});
 }
 
@@ -121,26 +131,26 @@ function renderLeftPersonas(){
     const card=document.createElement("div");
     if(p.status==="processing"){
       card.className="entity-card entity-card--inprog";
-      const thumb=document.createElement("div");thumb.className="entity-thumb";thumb.style.position="relative";setThumb(thumb,p.image_path);
+      const thumb=document.createElement("div");thumb.className="entity-thumb";thumb.style.position="relative";setThumb(thumb,p.image_url);
       const spin=document.createElement("div");spin.className="entity-spin";thumb.appendChild(spin);
       const info=document.createElement("div");info.className="entity-info";
       info.innerHTML=`<div class="entity-name">${esc(p.name)}</div><div class="entity-stage">${esc(stageLabel(p.status,p.stage))}</div>`;
       const cancelBtn=document.createElement("button");cancelBtn.className="entity-delete-btn";cancelBtn.textContent="✕";cancelBtn.title="Cancel";
       cancelBtn.onclick=e=>{e.stopPropagation();cancelBtn.disabled=true;
-        api(`/api/studio/personas/${p.id}/cancel`,{method:"POST"}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
+        fetch(`/personas/${p.id}/cancel`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
       card.append(thumb,info,cancelBtn);
     }else{
       const g=p.gender==="female"?"female":p.gender==="male"?"male":"unknown";
       const rc=(p.avatars||[]).filter(a=>a.status==="ready").length;
       card.className="entity-card"+(p.id===selectedPersonaId?" active":"");
-      card.innerHTML=`<div class="entity-thumb" style="background-image:url('${(p.image_path||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
+      card.innerHTML=`<div class="entity-thumb" style="background-image:url('${(p.image_url||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
         <div class="entity-info"><div class="entity-name">${esc(p.name)}</div>
         <div class="entity-meta"><span class="gender-dot ${g}"></span>${p.gender||"unknown"} · ${rc} avatar${rc!==1?"s":""}</div></div>`;
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("persona",p.id,p.name);};card.appendChild(del);
       card.addEventListener("click",()=>{selectedPersonaId=p.id;selectedAvatarId=null;showView("persona");});
       card.draggable=true;
-      card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"persona",id:p.id,name:p.name,image_path:p.image_path}));e.dataTransfer.effectAllowed="copy";});
+      card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"persona",id:p.id,name:p.name,image_url:p.image_url}));e.dataTransfer.effectAllowed="copy";});
     }
     list.appendChild(card);
   });
@@ -159,7 +169,7 @@ function renderLeftAvatars(){
     if(av.status==="generating"){
       card.className="entity-card entity-card--draft"+(av.id===selectedAvatarId?" active-purple":"");
       card.style.pointerEvents="auto";card.style.cursor="pointer";
-      const thumb=document.createElement("div");thumb.className="entity-thumb sm";thumb.style.position="relative";setThumb(thumb,av.image_path);
+      const thumb=document.createElement("div");thumb.className="entity-thumb sm";thumb.style.position="relative";setThumb(thumb,av.image_url);
       const spin=document.createElement("div");spin.className="entity-spin";thumb.appendChild(spin);
       const info=document.createElement("div");info.className="entity-info";
       info.innerHTML=`<div class="entity-name">${esc(av.name)}</div><div class="entity-stage">⚡ Generating image…</div>`;
@@ -169,7 +179,7 @@ function renderLeftAvatars(){
       card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
     }else if(av.status==="not_saved"){
       card.className="entity-card entity-card--draft"+(av.id===selectedAvatarId?" active-purple":"");
-      const thumb=document.createElement("div");thumb.className="entity-thumb sm";setThumb(thumb,av.image_path);
+      const thumb=document.createElement("div");thumb.className="entity-thumb sm";setThumb(thumb,av.image_url);
       const info=document.createElement("div");info.className="entity-info";
       info.innerHTML=`<div class="entity-name">${esc(av.name)}</div><div class="entity-stage" style="color:var(--amber)">◐ Not saved</div>`;
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
@@ -178,24 +188,24 @@ function renderLeftAvatars(){
       card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
     }else if(av.status==="ready"){
       card.className="entity-card"+(av.id===selectedAvatarId?" active-purple":"");
-      card.innerHTML=`<div class="entity-thumb sm" style="background-image:url('${(av.image_path||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
+      card.innerHTML=`<div class="entity-thumb sm" style="background-image:url('${(av.image_url||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
         <div class="entity-info"><div class="entity-name">${esc(av.name)}</div>
         <div class="entity-meta">${esc(av.decoration||"No style")}</div></div>`;
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("avatar",av.id,av.name);};card.appendChild(del);
       card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
       card.draggable=true;
-      card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"avatar",id:av.id,name:av.name,image_path:av.image_path,persona_id:av.persona_id}));e.dataTransfer.effectAllowed="copy";});
+      card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"avatar",id:av.id,name:av.name,image_url:av.image_url,persona_id:av.persona_id}));e.dataTransfer.effectAllowed="copy";});
     }else if(av.status==="processing"){
       card.className="entity-card entity-card--draft"+(av.id===selectedAvatarId?" active-purple":"");
       card.style.pointerEvents="auto";card.style.cursor="pointer";
-      const thumb=document.createElement("div");thumb.className="entity-thumb sm";thumb.style.position="relative";setThumb(thumb,av.image_path);
+      const thumb=document.createElement("div");thumb.className="entity-thumb sm";thumb.style.position="relative";setThumb(thumb,av.image_url);
       const spin=document.createElement("div");spin.className="entity-spin";thumb.appendChild(spin);
       const info=document.createElement("div");info.className="entity-info";
       info.innerHTML=`<div class="entity-name">${esc(av.name)}</div><div class="entity-stage">${esc(stageLabel(av.status,av.stage))}</div>`;
       const cancelBtn=document.createElement("button");cancelBtn.className="entity-delete-btn";cancelBtn.textContent="✕";cancelBtn.title="Cancel";cancelBtn.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       cancelBtn.onclick=e=>{e.stopPropagation();cancelBtn.disabled=true;
-        api(`/api/studio/avatars/${av.id}/cancel`,{method:"POST"}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
+        fetch(`/avatars/${av.id}/cancel`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
       card.append(thumb,info,cancelBtn);
       card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
     }else if(av.status==="failed"){
@@ -203,7 +213,7 @@ function renderLeftAvatars(){
       card.className="entity-card entity-card--draft"+(av.id===selectedAvatarId?" active-purple":"");
       card.style.pointerEvents="auto";card.style.cursor="pointer";
       card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
-      const thumb=document.createElement("div");thumb.className="entity-thumb sm";setThumb(thumb,av.image_path);
+      const thumb=document.createElement("div");thumb.className="entity-thumb sm";setThumb(thumb,av.image_url);
       const info=document.createElement("div");info.className="entity-info";
       info.innerHTML=`<div class="entity-name">${esc(av.name)}</div><div class="entity-stage err">✗ ${rl?"Rate limited":"Failed"}</div>`;
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
@@ -214,7 +224,7 @@ function renderLeftAvatars(){
       const btn=document.createElement("button");btn.className="btn-retry-sm";btn.dataset.rk=rk;
       btn.textContent=secs>0?`Retry in ${secs}s`:"↻ Retry";btn.disabled=secs>0;
       btn.onclick=async e=>{e.stopPropagation();btn.disabled=true;
-        try{await api(`/api/studio/avatars/${av.id}/retry?client_id=${clientId}`,{method:"POST"});await refreshAll();}
+        try{await fetch(`/avatars/${av.id}/retry`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(r=>{if(!r.ok)throw new Error("retry failed");});await refreshAll();}
         catch(e){if(isRateLimitError(e.message)){_setRetry(rk);_ensureTick();}else{alert("Retry failed: "+e.message);}btn.disabled=false;}};
       card.appendChild(btn);if(rl)_ensureTick();
       card.appendChild(del);
@@ -261,7 +271,7 @@ function renderLeftVoices(){
       info.innerHTML=`<div class="voice-card-name">${esc(v.name)}</div><div class="entity-stage err" title="${esc(v.last_error||'')}">✗ ${esc(errSnip)}</div>`;
       const retry=document.createElement("button");retry.className="btn-retry-sm";retry.textContent="↻ Retry";retry.title="Retry";
       retry.onclick=async e=>{e.stopPropagation();retry.disabled=true;retry.textContent="…";
-        try{await api(`/api/studio/voices/${v.id}/retry?client_id=${clientId}`,{method:"POST"});await refreshAll();}
+        try{await fetch(`/voices/${v.id}/retry`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(r=>{if(!r.ok)throw new Error("retry failed");});await refreshAll();}
         catch(er){alert("Retry failed: "+er.message);retry.disabled=false;retry.textContent="↻ Retry";}};
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("voice",v.id,v.name);};
@@ -320,7 +330,7 @@ function renderLeftContacts(){
     const p=studio.find(x=>x.id===asst.persona_id),av=p?.avatars?.find(x=>x.id===asst.avatar_id);
     const item=document.createElement("div");
     item.className="contact-item"+(asst.id===selectedAssistantId?" active":"");
-    item.innerHTML=`<div class="contact-thumb-sm" style="background-image:url('${(av?.image_path||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
+    item.innerHTML=`<div class="contact-thumb-sm" style="background-image:url('${(av?.image_url||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
       <div><div class="contact-item-name">${esc(asst.name)}</div>
       <div class="contact-item-meta">${esc(p?.name||"")} › ${esc(av?.name||"")}</div></div>
       <div class="contact-call-dot"></div>`;
@@ -367,7 +377,7 @@ function initNewPersona(){
 /* ── Persona view ── */
 function initPersonaView(){
   const p=getPersona();if(!p){showView("welcome");return;}
-  setThumb($("pv-thumb"),p.image_path);$("pv-name").textContent=p.name;
+  setThumb($("pv-thumb"),p.image_url);$("pv-name").textContent=p.name;
   const gp=$("pv-gender");gp.textContent=p.gender==="female"?"♀ Female":p.gender==="male"?"♂ Male":"⚥ Unknown";
   const en=$("edit-persona-name");if(en)en.value=p.name;
   setStatus($("edit-persona-status"),"");
@@ -393,7 +403,9 @@ function setupPvVoiceDropSlot(p){
       const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");
       if(d.type==="voice"){pvDroppedVoiceId=d.id;renderPvVoiceSlot();}
       else if(d.type==="library-voice"){
-        const v=await api("/api/studio/voices/from-library",{method:"POST",body:JSON.stringify({voice_id:d.voice_id,name:d.name,preview_url:d.preview_url})});
+        const _r=await fetch("/voices/from-library",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,voice_id:d.voice_id,name:d.name,preview_url:d.preview_url})});
+        if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voices/from-library failed");
+        const v=await _r.json();
         if(!voices.find(x=>x.id===v.id))voices=[v,...voices];
         pvDroppedVoiceId=v.id;renderPvVoiceSlot();renderLeftVoices();
       }
@@ -414,7 +426,7 @@ function setupPvVoiceDropSlot(p){
     else{badge.textContent="Default";badge.className="voice-badge";}
   }
   if(meta)meta.textContent=linkedVoice?`ElevenLabs · ${linkedVoice.name}`:p.voice_id?`ElevenLabs · ${p.voice_id.slice(0,10)}…`:"No custom voice";
-  const previewUrl=linkedVoice?.preview_url||p.voice_preview_path||"";
+  const previewUrl=linkedVoice?.preview_url||p.voice_preview_url||"";
   if(playBtn){playBtn.hidden=!previewUrl;playBtn.onclick=()=>{const audio=$("voice-preview-audio");if(audio&&previewUrl){audio.src=previewUrl;audio.play().catch(()=>{});}};}
   if(unlinkBtn)unlinkBtn.hidden=!p.voice_id;
 }
@@ -438,7 +450,7 @@ $("pv-voice-unlink-btn")?.addEventListener("click",async()=>{
   const p=getPersona();if(!p)return;
   if(!confirm("Unlink voice from this persona?"))return;
   try{
-    await api(`/api/studio/personas/${p.id}`,{method:"PATCH",body:JSON.stringify({voice_ref_id:null})});
+    await fetch(`/personas/${p.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,voice_ref_id:null})});
     pvDroppedVoiceId=null;renderPvVoiceSlot();
     await refreshAll();initPersonaView();
   }catch(e){setStatus($("edit-persona-status"),e.message,"error");}
@@ -447,7 +459,7 @@ $("pv-voice-unlink-btn")?.addEventListener("click",async()=>{
 /* ── Avatar view ── */
 function initAvatarView(){
   const av=getAvatar(),p=getPersona();if(!av||!p){showView("welcome");return;}
-  setThumb($("avv-thumb"),av.image_path);$("avv-name").textContent=av.name;$("avv-persona").textContent=p.name;
+  setThumb($("avv-thumb"),av.image_url);$("avv-name").textContent=av.name;$("avv-persona").textContent=p.name;
   const inProgress=av.status==="generating"||av.status==="processing"||av.status==="failed"||av.status==="not_saved";
   const notSaved=av.status==="not_saved";
   $("avv-not-saved-block").hidden=!inProgress;
@@ -458,7 +470,7 @@ function initAvatarView(){
   $("avv-assistant-actions").hidden=inProgress;
   $("avv-clone-actions").hidden=true;
   if(inProgress){
-    $("avv-preview-img").src=av.image_path||PLACEHOLDER;
+    $("avv-preview-img").src=av.image_url||PLACEHOLDER;
     const lbl=$("avv-preview-label");
     const hint=$("avv-not-saved-block").querySelector("p[style]");
     const spin=$("avv-preview-spin");
@@ -491,8 +503,8 @@ $("avv-save-avatar-btn").addEventListener("click",async()=>{
     fd.append("persona_id",p.id);fd.append("name",av.name);
     fd.append("decoration",av.decoration||"");fd.append("theme_prompt",av.theme_prompt||"");
     fd.append("preset_ids",JSON.stringify(av.preset_ids||[]));
-    fd.append("draft_avatar_id",av.id);fd.append("client_id",clientId);
-    await api("/api/studio/avatars",{method:"POST",body:fd});
+    fd.append("draft_avatar_id",av.id);fd.append("tenant_id",TENANT_ID);
+    {const _r=await fetch("/avatars",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar save failed");}
     setStatus($("avv-save-status"),"Saved!","success");await refreshAll();
   }catch(e){setStatus($("avv-save-status"),e.message,"error");}
   finally{btn.disabled=false;}
@@ -502,8 +514,8 @@ $("avv-save-avatar-btn").addEventListener("click",async()=>{
 function initAssistantView(){
   const asst=getAssistant();if(!asst){showView("welcome");return;}
   const p=studio.find(x=>x.id===asst.persona_id),av=p?.avatars?.find(x=>x.id===asst.avatar_id);
-  setThumb($("ca-thumb"),av?.image_path);$("ca-name").textContent=asst.name;$("ca-sub").textContent=(p?.name||"")+" › "+(av?.name||"");
-  setThumb($("ca-call-thumb"),av?.image_path);$("ca-call-name").textContent=asst.name;
+  setThumb($("ca-thumb"),av?.image_url);$("ca-name").textContent=asst.name;$("ca-sub").textContent=(p?.name||"")+" › "+(av?.name||"");
+  setThumb($("ca-call-thumb"),av?.image_url);$("ca-call-name").textContent=asst.name;
   setStatus($("ca-call-status"),"");
   const cn=$("clone-asst-name");if(cn)cn.value=asst.name+" Clone";
   const cp=$("clone-asst-prompt");if(cp)cp.value=asst.prompt||"";
@@ -582,7 +594,7 @@ function renderVdPersonaSlot(){
   if(vdDroppedPersonaId){
     const p=studio.find(x=>x.id===vdDroppedPersonaId);
     const name=p?p.name:`Persona #${vdDroppedPersonaId}`;
-    const imgUrl=p?.image_path||PLACEHOLDER;
+    const imgUrl=p?.image_url||PLACEHOLDER;
     slot.innerHTML=`<img class="slot-thumb" src="${imgUrl.replace(/"/g,'%22')}" alt=""/><span style="font-size:13px;font-weight:600;flex:1">${esc(name)}</span><button type="button" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:0" title="Clear" onclick="vdDroppedPersonaId=null;renderVdPersonaSlot()">✕</button>`;
   }else{
     slot.innerHTML='<span class="drop-hint">Drag a persona from the Personas panel</span>';
@@ -603,8 +615,8 @@ $("vd-design-submit-btn")?.addEventListener("click",async()=>{
     if(vdSelectedPresetId){fd.append("voice_preset_id",vdSelectedPresetId);}
     else{fd.append("description",description);}
     if(vdDroppedPersonaId){fd.append("persona_id",String(vdDroppedPersonaId));fd.append("include_persona_traits",includePersona?"true":"false");}
-    fd.append("client_id",clientId);
-    await api("/api/studio/voices/design",{method:"POST",body:fd});
+    fd.append("tenant_id",TENANT_ID);
+    {const _r=await fetch("/voices/design",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voice design failed");}
     setStatus(statusEl,"Voice design started — watch the Voices panel.","success");
     await refreshAll();
   }catch(e){setStatus(statusEl,e.message,"error");}
@@ -625,8 +637,8 @@ $("vd-clone-submit-btn")?.addEventListener("click",async()=>{
   const btn=$("vd-clone-submit-btn"),statusEl=$("vd-clone-status");
   btn.disabled=true;setStatus(statusEl,"Cloning voice…");
   try{
-    const fd=new FormData();fd.append("voice_sample",vdCloneSampleFile,vdCloneSampleFile.name);fd.append("name",name);fd.append("client_id",clientId);
-    await api("/api/studio/voices/clone",{method:"POST",body:fd});
+    const fd=new FormData();fd.append("voice_sample",vdCloneSampleFile,vdCloneSampleFile.name);fd.append("name",name);fd.append("tenant_id",TENANT_ID);
+    {const _r=await fetch("/voices/clone",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voice clone failed");}
     setStatus(statusEl,"Voice cloning started — watch the Voices panel.","success");
     await refreshAll();
   }catch(e){setStatus(statusEl,e.message,"error");}
@@ -654,8 +666,10 @@ $("create-persona-btn").addEventListener("click",async()=>{
   if(!croppedBlob)return setStatus($("persona-status"),"Crop an image first.","error");
   $("create-persona-btn").disabled=true;setStatus($("persona-status"),"Uploading…");
   try{
-    const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.png");fd.append("client_id",clientId);
-    const p=await api("/api/studio/personas",{method:"POST",body:fd});
+    const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.png");fd.append("tenant_id",TENANT_ID);
+    const _r=await fetch("/personas",{method:"POST",body:fd});
+    if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"persona create failed");
+    const p=await _r.json();
     croppedBlob=null;revoke(croppedUrl);croppedUrl="";revoke(sourceUrl);sourceUrl="";sourceFile=null;$("persona-image-input").value="";
     selectedPersonaId=p.id;selectedAvatarId=null;
     setStatus($("persona-status"),`'${p.name}' created!`,"success");await refreshAll();showView("persona");
@@ -668,7 +682,7 @@ $("save-persona-btn").addEventListener("click",async()=>{
   $("save-persona-btn").disabled=true;
   try{
     const body={name,voice_ref_id:pvDroppedVoiceId||null};
-    await api(`/api/studio/personas/${selectedPersonaId}`,{method:"PATCH",body:JSON.stringify(body)});
+    await fetch(`/personas/${selectedPersonaId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,...body})});
     setStatus($("edit-persona-status"),"Saved!","success");await refreshAll();initPersonaView();
   }
   catch(e){setStatus($("edit-persona-status"),e.message,"error");}finally{$("save-persona-btn").disabled=false;}
@@ -700,7 +714,9 @@ async function genAvatarPreview(personaId,name,sel,themeEl,previewAreaEl,imgEl,s
   const tp=[p2prompt(sel),themeEl?.value.trim()||""].filter(Boolean).join(", ");
   setStatus(statusEl,"Generating preview…");if(previewAreaEl)previewAreaEl.hidden=true;
   const fd=new FormData();fd.append("persona_id",personaId);fd.append("name",name);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(sel));
-  const data=await api("/api/studio/avatars/preview",{method:"POST",body:fd});
+  const _r=await fetch("/avatars/preview",{method:"POST",body:fd});
+  if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");
+  const data=await _r.json();
   if(imgEl&&data.preview_url)imgEl.src=data.preview_url;if(previewAreaEl)previewAreaEl.hidden=false;
   setStatus(statusEl,"Preview ready.");return tp;
 }
@@ -726,8 +742,8 @@ $("av-generate-btn").addEventListener("click",async()=>{
     fd.append("preset_ids",JSON.stringify(skipStyle?[]:pvPresets));
     fd.append("custom_prompt",skipStyle?"":customPrompt);
     fd.append("skip_style",skipStyle?"true":"false");
-    fd.append("client_id",clientId);
-    await api("/api/studio/avatars/preview",{method:"POST",body:fd});
+    fd.append("tenant_id",TENANT_ID);
+    {const _r=await fetch("/avatars/preview",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");}
     pvPresets=[];pvPresetCat="All";if(nameEl)nameEl.value=p.name;
     const ti=$("av-theme-input");if(ti)ti.value="";
     const sk=$("av-skip-style");if(sk)sk.checked=false;applyAvSkipStyle();
@@ -746,7 +762,7 @@ function renderNavPersonaSlot(){
   }
   const p=studio.find(x=>x.id===navDroppedPersonaId);
   if(!p){navDroppedPersonaId=null;return renderNavPersonaSlot();}
-  slot.innerHTML=`<img class="slot-thumb" src="${esc(p.image_path||PLACEHOLDER)}" alt=""/><b>${esc(p.name)}</b><span class="drop-hint" style="margin-left:auto">${esc(p.gender||"unknown")}</span>`;
+  slot.innerHTML=`<img class="slot-thumb" src="${esc(p.image_url||PLACEHOLDER)}" alt=""/><b>${esc(p.name)}</b><span class="drop-hint" style="margin-left:auto">${esc(p.gender||"unknown")}</span>`;
   if(btn)btn.disabled=false;
 }
 function renderNavPromptPreview(){
@@ -807,8 +823,8 @@ $("nav-generate-btn").addEventListener("click",async()=>{
     fd.append("preset_ids",JSON.stringify(skipStyle?[]:navPresets));
     fd.append("custom_prompt",skipStyle?"":customPrompt);
     fd.append("skip_style",skipStyle?"true":"false");
-    fd.append("client_id",clientId);
-    await api("/api/studio/avatars/preview",{method:"POST",body:fd});
+    fd.append("tenant_id",TENANT_ID);
+    {const _r=await fetch("/avatars/preview",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");}
     navPresets=[];navPresetCat="All";if(nameEl)nameEl.value="";
     const ti=$("nav-theme-input");if(ti)ti.value="";
     const sk=$("nav-skip-style");if(sk)sk.checked=false;applyNavSkipStyle();
@@ -828,7 +844,7 @@ function renderNaAvatarSlot(){
   let av=null,ownerPersona=null;
   for(const p of studio){const found=(p.avatars||[]).find(a=>a.id===naDroppedAvatarId);if(found){av=found;ownerPersona=p;break;}}
   if(!av){naDroppedAvatarId=null;return renderNaAvatarSlot();}
-  slot.innerHTML=`<img class="slot-thumb" src="${esc(av.image_path||PLACEHOLDER)}" alt=""/><b>${esc(av.name)}</b><span class="drop-hint" style="margin-left:auto">via ${esc(ownerPersona?.name||"")}</span>`;
+  slot.innerHTML=`<img class="slot-thumb" src="${esc(av.image_url||PLACEHOLDER)}" alt=""/><b>${esc(av.name)}</b><span class="drop-hint" style="margin-left:auto">via ${esc(ownerPersona?.name||"")}</span>`;
   if(btn)btn.disabled=false;
 }
 function initNewAssistantView(){
@@ -855,7 +871,9 @@ $("na-create-asst-btn").addEventListener("click",async()=>{
   if(!name||!prompt){setStatus($("na-asst-status"),"Name and instructions required.","error");return;}
   const btn=$("na-create-asst-btn");btn.disabled=true;setStatus($("na-asst-status"),"Creating…");
   try{
-    const r=await api("/api/studio/assistants",{method:"POST",body:JSON.stringify({name,prompt,first_message:fm||"Hi!",persona_id:ownerPersona.id,avatar_id:av.id,client_id:clientId})});
+    const _r=await fetch("/assistants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,name,prompt,first_message:fm||"Hi!",persona_id:ownerPersona.id,avatar_id:av.id})});
+    if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"assistant create failed");
+    const r=await _r.json();
     setStatus($("na-asst-status"),`'${r.name}' created!`,"success");await refreshAll();
   }catch(e){setStatus($("na-asst-status"),e.message,"error");}
   finally{btn.disabled=false;}
@@ -891,7 +909,13 @@ $("create-asst-btn").addEventListener("click",async()=>{
   const name=$("asst-name-input")?.value.trim(),prompt=$("asst-prompt-input")?.value.trim(),fm=$("asst-msg-input")?.value.trim();
   if(!name||!prompt)return setStatus($("asst-status"),"Name and instructions required.","error");
   $("create-asst-btn").disabled=true;setStatus($("asst-status"),"Creating…");
-  try{const r=await api("/api/studio/assistants",{method:"POST",body:JSON.stringify({name,prompt,first_message:fm||"Hi!",persona_id:p.id,avatar_id:av.id})});setStatus($("asst-status"),`'${r.name}' created!`,"success");await refreshAll();}
+  try{
+    const _r=await fetch("/assistants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,name,prompt,first_message:fm||"Hi!",persona_id:p.id,avatar_id:av.id})});
+    if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"assistant create failed");
+    const r=await _r.json();
+    setStatus($("asst-status"),`'${r.name}' created!`,"success");
+    await refreshAll();
+  }
   catch(e){setStatus($("asst-status"),e.message,"error");}finally{$("create-asst-btn").disabled=false;}
 });
 
@@ -909,8 +933,8 @@ $("clone-av-save-btn").addEventListener("click",async()=>{
   const tp=[p2prompt(clonePresets),$("clone-av-theme")?.value.trim()||""].filter(Boolean).join(", ");
   $("clone-av-save-btn").disabled=true;setStatus($("clone-av-status"),"Saving…");
   try{
-    const fd=new FormData();fd.append("persona_id",p.id);fd.append("name",name);fd.append("decoration",tp);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(clonePresets));fd.append("client_id",clientId);
-    await api("/api/studio/avatars",{method:"POST",body:fd});setStatus($("clone-av-status"),"Clone queued!","success");await refreshAll();
+    const fd=new FormData();fd.append("persona_id",p.id);fd.append("name",name);fd.append("decoration",tp);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(clonePresets));fd.append("tenant_id",TENANT_ID);
+    {const _r=await fetch("/avatars",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar save failed");}setStatus($("clone-av-status"),"Clone queued!","success");await refreshAll();
   }catch(e){setStatus($("clone-av-status"),e.message,"error");}finally{$("clone-av-save-btn").disabled=false;}
 });
 
@@ -921,7 +945,13 @@ $("clone-asst-btn").addEventListener("click",async()=>{
   const name=$("clone-asst-name")?.value.trim(),prompt=$("clone-asst-prompt")?.value.trim(),fm=$("clone-asst-msg")?.value.trim();
   if(!name||!prompt)return setStatus($("clone-asst-status"),"Name and instructions required.","error");
   $("clone-asst-btn").disabled=true;setStatus($("clone-asst-status"),"Creating…");
-  try{const r=await api("/api/studio/assistants",{method:"POST",body:JSON.stringify({name,prompt,first_message:fm,persona_id:asst.persona_id,avatar_id:asst.avatar_id})});setStatus($("clone-asst-status"),`'${r.name}' created!`,"success");await refreshAll();}
+  try{
+    const _r=await fetch("/assistants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,name,prompt,first_message:fm,persona_id:asst.persona_id,avatar_id:asst.avatar_id})});
+    if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"assistant clone failed");
+    const r=await _r.json();
+    setStatus($("clone-asst-status"),`'${r.name}' created!`,"success");
+    await refreshAll();
+  }
   catch(e){setStatus($("clone-asst-status"),e.message,"error");}finally{$("clone-asst-btn").disabled=false;}
 });
 
@@ -981,8 +1011,19 @@ function openDeleteModal(type,id,name){
   _pendingDelete={type,id,name};$("delete-modal-title").textContent=`Delete ${type[0].toUpperCase()+type.slice(1)}?`;
   $("delete-modal-body").textContent=`"${name}" will be permanently removed.`;$("delete-modal-cascade").hidden=true;
   (async()=>{try{
-    if(type==="persona"){const c=await api(`/api/studio/personas/${id}/cascade-count`);const pts=[];if(c.avatars)pts.push(`${c.avatars} avatar${c.avatars!==1?"s":""}`);if(c.assistants)pts.push(`${c.assistants} assistant${c.assistants!==1?"s":""}`);if(pts.length){$("delete-modal-cascade-text").textContent=`Also deletes: ${pts.join(" and ")}.`;$("delete-modal-cascade").hidden=false;}}
-    else if(type==="avatar"){const c=await api(`/api/studio/avatars/${id}/cascade-count`);if(c.assistants){$("delete-modal-cascade-text").textContent=`Also deletes ${c.assistants} assistant${c.assistants!==1?"s":""}.`;$("delete-modal-cascade").hidden=false;}}
+    if(type==="persona"){
+      const _r=await fetch(`/personas/${id}/cascade-count`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      const c=await _r.json();
+      const pts=[];
+      if(c.avatars)pts.push(`${c.avatars} avatar${c.avatars!==1?"s":""}`);
+      if(c.assistants)pts.push(`${c.assistants} assistant${c.assistants!==1?"s":""}`);
+      if(pts.length){$("delete-modal-cascade-text").textContent=`Will leave ${pts.join(" and ")} orphaned.`;$("delete-modal-cascade").hidden=false;}
+    }
+    else if(type==="avatar"){
+      const _r=await fetch(`/avatars/${id}/cascade-count`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      const c=await _r.json();
+      if(c.assistants){$("delete-modal-cascade-text").textContent=`Will leave ${c.assistants} assistant${c.assistants!==1?"s":""} orphaned.`;$("delete-modal-cascade").hidden=false;}
+    }
   }catch{}})();
   $("delete-modal").hidden=false;
 }
@@ -991,7 +1032,10 @@ $("delete-confirm-btn").addEventListener("click",async()=>{
   if(!_pendingDelete)return;const{type,id}=_pendingDelete;$("delete-confirm-btn").disabled=true;
   try{
     const path=type==="assistant"?"assistants":type==="avatar"?"avatars":type==="voice"?"voices":"personas";
-    await api(`/api/studio/${path}/${id}`,{method:"DELETE"});
+    {
+      const _r=await fetch(`/${path}/${id}`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"delete failed");
+    }
     $("delete-modal").hidden=true;_pendingDelete=null;
     if(type==="persona"&&selectedPersonaId===id){selectedPersonaId=null;selectedAvatarId=null;showView("welcome");}
     else if(type==="avatar"&&selectedAvatarId===id){selectedAvatarId=null;showView("persona");}
@@ -1020,7 +1064,9 @@ async function launchCall(){
   if(!window.LivekitClient){alert("LiveKit client not loaded yet — try again in a moment.");return;}
   const {Room,RoomEvent,Track}=window.LivekitClient;
   try{
-    const data=await api("/api/studio/calls",{method:"POST",body:JSON.stringify({assistant_id:asst.id})});
+    const _r=await fetch("/calls",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,assistant_id:asst.id})});
+    if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"call create failed");
+    const data=await _r.json();
     $("call-title").textContent=asst.name;
     setCallMode("fullscreen");setCallWaiting(true,"Connecting…");
 
@@ -1047,7 +1093,8 @@ async function launchCall(){
         : "Microphone unavailable: "+(micErr.message||micErr.name||"unknown error"));
     }
 
-    await room.connect(data.livekit_url,data.participant_token);
+    // /calls now returns { livekit:{url,token,room,identity}, assistant, avatar, voice }
+    await room.connect(data.livekit.url,data.livekit.token);
     await room.localParticipant.setMicrophoneEnabled(true);
 
     room.remoteParticipants.forEach(p=>{
@@ -1077,12 +1124,67 @@ function hangup(){
 $("hangup-call-btn").addEventListener("click",hangup);$("floating-hangup-btn").addEventListener("click",hangup);
 
 /* ── WS + Data ── */
-function connectWS(){if(ws)ws.close();const proto=location.protocol==="https:"?"wss":"ws";ws=new WebSocket(`${proto}://${location.host}/ws/updates/${clientId}`);ws.addEventListener("message",e=>{try{const m=JSON.parse(e.data);if(m.event?.match(/\./))refreshAll().catch(()=>{});}catch{}});ws.addEventListener("close",()=>{clearTimeout(wsTimer);wsTimer=setTimeout(connectWS,1500);});}
-async function loadPresets(){const data=await api("/api/studio/presets");PRESETS=data.avatar_presets||[];VOICE_PRESETS=data.voice_presets||[];}
-async function loadStudio(){studio=await api("/api/studio/personas");}
-async function loadAssistants(){assistants=await api("/api/studio/assistants");}
-async function loadVoices(){voices=await api("/api/studio/voices");}
-async function loadLibraryVoices(){if(libraryVoices.length)return;try{libraryVoices=await api("/api/studio/voices/library");}catch{}}
+// The pure API has no WebSocket; background-task progress is exposed via
+// per-resource /status endpoints. For the demo we keep it simple and just
+// re-fetch everything every 3 seconds. A production front-end would poll
+// only the resources it's actively waiting on (see README for the
+// per-resource polling recipe).
+function startPolling(){
+  if(pollTimer)clearInterval(pollTimer);
+  pollTimer=setInterval(()=>{refreshAll().catch(()=>{});},3000);
+}
+// GET /presets — no tenant context (catalogue is global).
+async function loadPresets(){
+  const r=await fetch("/presets");
+  const data=await r.json();
+  PRESETS=data.avatar_presets||[];
+  VOICE_PRESETS=data.voice_presets||[];
+}
+
+// POST /personas/list — body { tenant_id }. Filters + limit + offset
+// would go on the URL as ?gender=female&limit=20&offset=0.
+async function loadStudio(){
+  const r=await fetch("/personas/list",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({tenant_id:TENANT_ID}),
+  });
+  studio=await r.json();
+}
+
+// POST /assistants/list — same shape as /personas/list.
+async function loadAssistants(){
+  const r=await fetch("/assistants/list",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({tenant_id:TENANT_ID}),
+  });
+  assistants=await r.json();
+}
+
+// POST /voices/list — filters (gender, source, provider, status,
+// persona_id) and pagination would go on the URL.
+async function loadVoices(){
+  const r=await fetch("/voices/list",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({tenant_id:TENANT_ID}),
+  });
+  voices=await r.json();
+}
+
+// POST /voices/library — ElevenLabs's premade catalogue, cached server-side.
+async function loadLibraryVoices(){
+  if(libraryVoices.length)return;
+  try{
+    const r=await fetch("/voices/library",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tenant_id:TENANT_ID}),
+    });
+    libraryVoices=await r.json();
+  }catch{}
+}
 async function refreshAll(){
   await Promise.all([loadStudio(),loadAssistants(),loadVoices()]);
   renderAll();
@@ -1124,7 +1226,7 @@ document.addEventListener("click", e => {
 window.addEventListener("DOMContentLoaded",async()=>{
   setCallMode("hidden");
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=(v!=="cv-welcome");});
-  connectWS();
+  startPolling();
   try{await Promise.all([loadPresets(),loadStudio(),loadAssistants(),loadVoices()]);}catch(e){console.error("Initial load error:",e);}
   renderAll();
   loadLibraryVoices().then(()=>renderLeftVoices()).catch(()=>{});

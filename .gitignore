@@ -19,6 +19,8 @@ app.db-journal
 *.sqlite
 *.sqlite3
 static/uploads/
+# Local-tenant fallback runtime data (SQLite + on-disk blobs from local tests).
+local_data/
 
 # Temp / OS
 temp/

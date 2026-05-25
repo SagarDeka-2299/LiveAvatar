@@ -73,6 +73,65 @@ async def detect_gender_from_image(
     return "unknown"
 
 
+async def detect_gender_from_audio(
+    api_key: str,
+    audio_bytes: bytes,
+    *,
+    model: str,
+    mime_type: str = "audio/mpeg",
+) -> str:
+    """Identify the speaker's gender from a short audio sample.
+
+    Returns ``"male"``, ``"female"``, or ``"unknown"``. Falls back to
+    ``"unknown"`` on any error so the caller can persist a sensible default.
+    """
+    if not api_key or not audio_bytes:
+        return "unknown"
+    # Gemini's inline_data limit is around 20 MB; stay comfortably below it.
+    if len(audio_bytes) > 15 * 1024 * 1024:
+        return "unknown"
+
+    b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": (
+                            "Listen to this audio sample of a single speaker. "
+                            "Identify the apparent gender presentation of the speaker's voice. "
+                            "Reply with exactly one word — female, male, or unknown — and nothing else. "
+                            "Use unknown if it is ambiguous, has multiple speakers, or is non-speech."
+                        ),
+                    },
+                    {"inline_data": {"mime_type": mime_type, "data": b64}},
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 8,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    url = f"{GEMINI_BASE_URL}/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(url, headers=headers, json=payload)
+    data = _parse_json(response)
+    if response.status_code >= 400:
+        raise GeminiError(
+            f"Gemini audio gender detection failed ({response.status_code}): {data}"
+        )
+    text = _extract_text(data).strip().lower()
+    if "female" in text:
+        return "female"
+    if "male" in text:
+        return "male"
+    return "unknown"
+
+
 async def describe_voice_from_image(
     api_key: str,
     image_bytes: bytes,

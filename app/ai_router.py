@@ -31,6 +31,29 @@ async def detect_gender(image_bytes: bytes, *, mime_type: str = "image/png") -> 
     raise AIProviderError(f"Unknown GENDER_PROVIDER: {provider}")
 
 
+async def detect_gender_from_audio(
+    audio_bytes: bytes, *, mime_type: str = "audio/mpeg"
+) -> str:
+    """Identify the speaker's gender from an audio clip.
+
+    ElevenLabs does not return gender metadata on Instant Voice Cloning, so
+    we route this through Gemini's audio-understanding model regardless of
+    the configured ``GENDER_PROVIDER``. Returns ``"unknown"`` when the
+    Gemini key is missing or detection fails.
+    """
+    if not settings.gemini_api_key:
+        return "unknown"
+    try:
+        return await gemini_client.detect_gender_from_audio(
+            settings.gemini_api_key,
+            audio_bytes,
+            model=settings.gender_model_gemini,
+            mime_type=mime_type,
+        )
+    except Exception:
+        return "unknown"
+
+
 async def describe_voice(
     image_bytes: bytes,
     *,
