@@ -11,9 +11,16 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
-COPY static ./static
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
+COPY scripts ./scripts
 COPY livekit_agent ./livekit_agent
 COPY .env.example ./.env.example
+
+# Default location for the local-tenant SQLite + blob fallback. Mount a
+# volume here in docker-compose to persist test data across container
+# restarts. In production tenants this directory is never touched.
+RUN mkdir -p /app/local_data
 
 EXPOSE 8000
 
