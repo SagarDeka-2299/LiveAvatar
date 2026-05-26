@@ -33,6 +33,8 @@ credentials live in Key Vault and are not env vars.
 | `TENANT_SECRET_TTL_SECONDS` | In-process cache TTL for per-tenant secrets (default `600`) |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | LiveKit room credentials |
 | `SIMLI_API_KEY` | Simli avatar API key |
+| `SIMLI_TRANSPORT` | Call transport: `livekit` (default) or `auto`. When `auto`, skips LiveKit and uses Simli Auto sessions (Daily WebRTC rooms). |
+| `SIMLI_AZURE_PROXY_URL` | Public reverse proxy URL (e.g. ngrok tunnel) used to route Simli Auto sessions to Azure OpenAI |
 | `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | AI provider keys |
 | `GENDER_PROVIDER` ∈ `openai` / `gemini` / `azure_openai`; per-provider model env vars (`GENDER_MODEL_GEMINI`, `GENDER_MODEL_OPENAI`, `GENDER_MODEL_AZURE_OPENAI`) | Vision gender classifier |
 | `IMAGE_PROVIDER` ∈ `openai` / `gemini` / `azure_openai`; `IMAGE_MODEL_GEMINI`, `IMAGE_MODEL_OPENAI` (Azure uses `AZURE_IMAGE_DEPLOYMENT`) | Avatar image editor |

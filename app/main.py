@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -30,12 +31,12 @@ from typing import Any, AsyncIterator
 from uuid import uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app import ai_router, elevenlabs_client, repositories as repo, schemas as S
 from app.config import settings
@@ -61,6 +62,8 @@ from app.tenancy import (
     shutdown_tenants,
     tenant_ctx,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── App + lifespan ────────────────────────────────────────────────────────────
@@ -1935,30 +1938,39 @@ def _build_simli_auto_payload(
             "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
         }
     elif llm_provider_lower == "azure_openai":
-        # Simli Auto has no native Azure OpenAI support due to custom header requirements
-        # (Azure requires `api-key` instead of `Authorization: Bearer`).
-        # Therefore, we automatically fall back to standard OpenAI or Google Gemini.
-        if settings.openai_api_key:
+        if settings.simli_azure_proxy_url:
+            deployment = assistant.llm_model or settings.call_llm_model_azure_openai or "gpt-4o"
             llm_config = {
-                "model": "gpt-4o-mini",
+                "model": deployment,
                 "provider": "User",
-                "apiKey": settings.openai_api_key,
-                "baseURL": "https://api.openai.com/v1",
-            }
-        elif settings.gemini_api_key:
-            llm_config = {
-                "model": "gemini-1.5-flash",
-                "provider": "User",
-                "apiKey": settings.gemini_api_key,
-                "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+                "apiKey": settings.azure_openai_api_key,
+                "baseURL": f"{settings.simli_azure_proxy_url.rstrip('/')}/azure-openai-proxy/{deployment}",
             }
         else:
-            llm_config = {
-                "model": settings.call_llm_model_openai,
-                "provider": "User",
-                "apiKey": settings.openai_api_key,
-                "baseURL": "https://api.openai.com/v1",
-            }
+            # Simli Auto has no native Azure OpenAI support due to custom header requirements
+            # (Azure requires `api-key` instead of `Authorization: Bearer`).
+            # Therefore, we automatically fall back to standard OpenAI or Google Gemini.
+            if settings.openai_api_key:
+                llm_config = {
+                    "model": "gpt-4o-mini",
+                    "provider": "User",
+                    "apiKey": settings.openai_api_key,
+                    "baseURL": "https://api.openai.com/v1",
+                }
+            elif settings.gemini_api_key:
+                llm_config = {
+                    "model": "gemini-1.5-flash",
+                    "provider": "User",
+                    "apiKey": settings.gemini_api_key,
+                    "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+                }
+            else:
+                llm_config = {
+                    "model": settings.call_llm_model_openai,
+                    "provider": "User",
+                    "apiKey": settings.openai_api_key,
+                    "baseURL": "https://api.openai.com/v1",
+                }
     else:
         llm_config = {
             "model": llm_model or settings.call_llm_model_openai,
@@ -2742,3 +2754,73 @@ async def retry_voice(
     return {"status": "retrying"}
 
 
+@app.post("/azure-openai-proxy/{deployment}/chat/completions")
+async def azure_openai_proxy(
+    deployment: str,
+    request: Request,
+):
+    """Proxy route to forward standard OpenAI-compatible requests to Azure OpenAI.
+
+    This translates the bearer token authentication used by Simli Auto to Azure's
+    custom api-key header, maintaining standard SSE streaming formats seamlessly.
+    """
+    if not settings.azure_openai_endpoint:
+        logger.error("Proxy request failed: AZURE_OPENAI_ENDPOINT is not configured")
+        raise HTTPException(
+            status_code=500,
+            detail="AZURE_OPENAI_ENDPOINT is not configured on the backend.",
+        )
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        logger.error(f"Proxy request failed to parse body as JSON: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    endpoint_base = settings.azure_openai_endpoint.rstrip("/")
+    api_version = settings.azure_openai_api_version or "2025-01-01-preview"
+    target_url = f"{endpoint_base}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+
+    # Extract api-key from Authorization header or default to server setting
+    auth_header = request.headers.get("Authorization", "")
+    api_key = settings.azure_openai_api_key
+    if auth_header.startswith("Bearer "):
+        extracted_key = auth_header.split("Bearer ", 1)[1].strip()
+        if extracted_key:
+            api_key = extracted_key
+
+    if not api_key:
+        logger.error("Proxy request failed: No API key provided or configured")
+        raise HTTPException(
+            status_code=401,
+            detail="Azure OpenAI API key is missing. Configure AZURE_OPENAI_API_KEY.",
+        )
+
+    headers = {
+        "api-key": api_key,
+        "Content-Type": "application/json",
+    }
+
+    async def response_streamer():
+        try:
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "POST",
+                    target_url,
+                    headers=headers,
+                    json=body,
+                    timeout=60.0,
+                ) as response:
+                    if response.status_code >= 400:
+                        err_body = await response.aread()
+                        err_msg = err_body.decode("utf-8", errors="ignore")
+                        logger.error(f"Azure OpenAI returned error status {response.status_code}: {err_msg}")
+                        raise RuntimeError(f"Azure OpenAI error: {err_msg}")
+                    
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+        except Exception as e:
+            logger.exception(f"Error in Azure OpenAI proxy stream: {e}")
+            raise
+
+    return StreamingResponse(response_streamer(), media_type="text/event-stream")
