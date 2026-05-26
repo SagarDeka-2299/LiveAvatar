@@ -56,22 +56,31 @@ async def generate_voice_preview_text(description: str) -> str:
     TTS preview synthesis. Returns a single sentence (typically 5–15
     words). Falls back to a generic line if the LLM is unavailable or
     the description is empty.
+
+    NOTE: ElevenLabs voice design previews require the 'text' field to
+    be at least 100 characters long, so we ensure the prompt asks for
+    at least 100 characters, and pad/fallback to a longer string if
+    needed.
     """
-    fallback = "Hello — it's good to be here."
+    fallback = (
+        "First, let me welcome you today. We are going to explore some truly "
+        "wonderful things together in this session, and I hope you find it "
+        "incredibly helpful and inspiring."
+    )
     desc = (description or "").strip()
     if not desc:
         return fallback
 
     system_msg = (
-        "You write a SINGLE SHORT showcase line that a voice actor would "
-        "use to audition for the voice described. The line MUST be one "
-        "natural sentence between 5 and 15 words. Tailor it to the "
-        "voice's character — a warm therapist would say something gentle, "
-        "an energetic coach something motivational, a deep narrator "
-        "something cinematic. Return ONLY the line, no quotes, no "
-        "preamble, no explanation."
+        "You write a showcase paragraph that a voice actor would use to "
+        "audition for the voice described. The audition passage MUST be at "
+        "least 100 characters long (typically 20-30 words) to ensure a complete "
+        "audio preview. Tailor it to the voice's character — a warm therapist "
+        "would say something gentle, an energetic coach something motivational, "
+        "a deep narrator something cinematic. Return ONLY the passage, no "
+        "quotes, no preamble, no explanation."
     )
-    user_msg = f"Voice description:\n{desc}\n\nWrite the showcase line:"
+    user_msg = f"Voice description:\n{desc}\n\nWrite the showcase audition passage (must be at least 100 characters):"
 
     provider = settings.gender_provider
     try:
@@ -106,12 +115,25 @@ async def generate_voice_preview_text(description: str) -> str:
     # The model occasionally wraps the line in quotes or adds a leading
     # "Sure! Here's the line:" — strip both.
     cleaned = text.strip().strip('"').strip("'").strip()
-    # If the model produced multiple lines, take the first non-empty one.
-    for line in cleaned.splitlines():
-        line = line.strip().strip('"').strip("'").strip()
-        if line:
-            return line
-    return fallback
+    
+    # Join non-empty lines to preserve the length of the generated passage
+    lines = [line.strip().strip('"').strip("'").strip() for line in cleaned.splitlines() if line.strip()]
+    if lines:
+        cleaned = " ".join(lines)
+    else:
+        cleaned = fallback
+
+    # Ensure it is at least 100 characters
+    if len(cleaned) < 100:
+        padding = (
+            " This audition passage is designed to showcase the full range, "
+            "depth, and unique qualities of this voice across multiple sentences."
+        )
+        cleaned = f"{cleaned} {padding}"
+        if len(cleaned) < 100:
+            cleaned = fallback
+
+    return cleaned
 
 
 async def detect_gender_from_audio(
