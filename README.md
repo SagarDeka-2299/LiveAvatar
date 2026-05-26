@@ -425,12 +425,14 @@ async function startCall(assistantId) {
     let audioTrack = null;
 
     room.remoteParticipants.forEach(p => {
-      p.trackPublications.forEach(pub => {
-        if (pub.isSubscribed && pub.track) {
-          if (pub.track.kind === "video") videoTrack = pub.track;
-          else if (pub.track.kind === "audio") audioTrack = pub.track;
-        }
-      });
+      if (p.identity === "simli-avatar-agent") {
+        p.trackPublications.forEach(pub => {
+          if (pub.isSubscribed && pub.track) {
+            if (pub.track.kind === "video") videoTrack = pub.track;
+            else if (pub.track.kind === "audio") audioTrack = pub.track;
+          }
+        });
+      }
     });
 
     const tracks = [];

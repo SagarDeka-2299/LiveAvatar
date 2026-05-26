@@ -1701,32 +1701,41 @@ $("delete-confirm-btn").addEventListener("click",async()=>{
 function setCallMode(m){$("call-shell").hidden=m!=="fullscreen";$("floating-call").hidden=m!=="floating";}
 function setCallWaiting(show,msg){const el=$("call-waiting");if(!el)return;el.hidden=!show;if(msg)el.textContent=msg;}
 
-function attachTrack(pub){
+function attachTrack(pub, participant){
   const track = pub.track;
   if (!track) return;
   
   const vid = $("call-video");
   if (!vid) return;
 
+  // ONLY attach audio/video from the Simli avatar agent to guarantee absolute synchronization
+  const isSimli = participant && (participant.identity === "simli-avatar-agent" || participant.identity?.startsWith("simli-"));
+  if (!isSimli) {
+    console.log("Ignoring non-Simli track:", track.kind, "from", participant?.identity);
+    return;
+  }
+
   if (track.kind === "video") {
     setCallWaiting(false);
   }
 
-  // Find all subscribed remote tracks in the room
+  // Find all subscribed remote tracks in the room from the Simli agent
   let remoteVideoTrack = null;
   let remoteAudioTrack = null;
 
   if (lkRoom) {
     lkRoom.remoteParticipants.forEach(p => {
-      p.trackPublications.forEach(publication => {
-        if (publication.isSubscribed && publication.track) {
-          if (publication.track.kind === "video") {
-            remoteVideoTrack = publication.track;
-          } else if (publication.track.kind === "audio") {
-            remoteAudioTrack = publication.track;
+      if (p.identity === "simli-avatar-agent" || p.identity?.startsWith("simli-")) {
+        p.trackPublications.forEach(publication => {
+          if (publication.isSubscribed && publication.track) {
+            if (publication.track.kind === "video") {
+              remoteVideoTrack = publication.track;
+            } else if (publication.track.kind === "audio") {
+              remoteAudioTrack = publication.track;
+            }
           }
-        }
-      });
+        });
+      }
     });
   }
 
@@ -1766,12 +1775,15 @@ function attachTrack(pub){
   }
 }
 
-function detachTrack(pub){
+function detachTrack(pub, participant){
   const track = pub.track;
   if (!track) return;
   
   const vid = $("call-video");
   if (!vid) return;
+
+  const isSimli = participant && (participant.identity === "simli-avatar-agent" || participant.identity?.startsWith("simli-"));
+  if (!isSimli) return;
 
   // Detach using standard LiveKit routine
   try {
@@ -1780,21 +1792,23 @@ function detachTrack(pub){
     console.warn("Track detach failed:", e);
   }
 
-  // Re-combine any remaining remote tracks in the room
+  // Re-combine any remaining remote tracks from the Simli agent in the room
   let remainingVideo = null;
   let remainingAudio = null;
 
   if (lkRoom) {
     lkRoom.remoteParticipants.forEach(p => {
-      p.trackPublications.forEach(publication => {
-        if (publication.isSubscribed && publication.track && publication.track !== track) {
-          if (publication.track.kind === "video") {
-            remainingVideo = publication.track;
-          } else if (publication.track.kind === "audio") {
-            remainingAudio = publication.track;
+      if (p.identity === "simli-avatar-agent" || p.identity?.startsWith("simli-")) {
+        p.trackPublications.forEach(publication => {
+          if (publication.isSubscribed && publication.track && publication.track !== track) {
+            if (publication.track.kind === "video") {
+              remainingVideo = publication.track;
+            } else if (publication.track.kind === "audio") {
+              remainingAudio = publication.track;
+            }
           }
-        }
-      });
+        });
+      }
     });
   }
 
@@ -1830,9 +1844,12 @@ async function launchCall(){
 
     room.on(RoomEvent.TrackSubscribed,(track,pub,participant)=>{
       if(participant?.isLocal)return;
-      attachTrack(pub);
+      attachTrack(pub, participant);
     });
-    room.on(RoomEvent.TrackUnsubscribed,(track,pub)=>detachTrack(pub));
+    room.on(RoomEvent.TrackUnsubscribed,(track,pub,participant)=>{
+      if(participant?.isLocal)return;
+      detachTrack(pub, participant);
+    });
     room.on(RoomEvent.ParticipantConnected,p=>{
       if(p.isAgent||p.identity?.startsWith("agent-")||p.kind==="agent"){setCallWaiting(true,"Agent joining…");}
     });
@@ -1853,7 +1870,7 @@ async function launchCall(){
     await room.localParticipant.setMicrophoneEnabled(true);
 
     room.remoteParticipants.forEach(p=>{
-      p.trackPublications.forEach(pub=>{if(pub.isSubscribed&&pub.track)attachTrack(pub);});
+      p.trackPublications.forEach(pub=>{if(pub.isSubscribed&&pub.track)attachTrack(pub, p);});
     });
   }catch(e){console.error(e);alert("Call failed: "+e.message);hangup();}
 }
