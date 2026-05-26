@@ -52,6 +52,7 @@ from app.simli_client import (
     extract_generation_id,
     get_face_generation_status,
     normalize_generation_status,
+    start_auto_session,
     upload_face_image,
 )
 from app.tenancy import (
@@ -1886,18 +1887,110 @@ async def delete_assistant(
 
 # ── Calls (plug-and-play LiveKit + face/voice metadata) ───────────────────────
 
+# Simli Auto only accepts ElevenLabs / Cartesia / PlayHT for TTS. Anything
+# else falls back to the system ElevenLabs default (Sarah).
+_SIMLI_AUTO_TTS_PROVIDERS = {"elevenlabs": "ElevenLabs", "cartesia": "Cartesia", "playht": "PlayHT"}
+_FALLBACK_ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
+
+# Mirror the LiveKit worker's language lock so the Auto path responds
+# in the user's language too (worker.py has the same suffix).
+_AUTO_LANGUAGE_LOCK = (
+    "\n\nLANGUAGE RULE — this overrides everything else: "
+    "Always detect the language of the user's most recent message and respond in that exact language. "
+    "If the user switches language mid-conversation, you switch immediately and fully — no lag, no mixing. "
+    "Every single word of your response must be in the user's current language. "
+    "Never insert English words or phrases when the user is speaking a non-English language. "
+    "Follow the user's language naturally like a fluent bilingual speaker would."
+)
+
+
+def _build_simli_auto_payload(
+    assistant: AssistantRow,
+    face_id: str,
+) -> dict[str, object]:
+    """Translate an Assistant row into Simli's ConfigurableSessionRequest."""
+
+    # ── TTS ──
+    provider_lower = (assistant.voice_provider or "").lower()
+    tts_provider_simli = _SIMLI_AUTO_TTS_PROVIDERS.get(provider_lower)
+    if tts_provider_simli:
+        tts_voice_id = assistant.voice_id or _FALLBACK_ELEVENLABS_VOICE_ID
+        tts_api_key = settings.elevenlabs_api_key if provider_lower == "elevenlabs" else ""
+    else:
+        # OpenAI / Google TTS aren't supported by Simli Auto — fall back to
+        # the system ElevenLabs default per the user's chosen policy.
+        tts_provider_simli = "ElevenLabs"
+        tts_voice_id = _FALLBACK_ELEVENLABS_VOICE_ID
+        tts_api_key = settings.elevenlabs_api_key
+
+    # ── LLM ──
+    llm_provider_lower = (assistant.llm_provider or settings.call_llm_provider).lower()
+    llm_model = assistant.llm_model or ""
+    llm_config: dict[str, object] = {}
+    if llm_provider_lower == "gemini":
+        llm_config = {
+            "model": llm_model or settings.call_llm_model_gemini,
+            "provider": "User",
+            "apiKey": settings.gemini_api_key,
+            "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+        }
+    elif llm_provider_lower == "azure_openai":
+        # Simli Auto has no native Azure OpenAI support due to custom header requirements
+        # (Azure requires `api-key` instead of `Authorization: Bearer`).
+        # Therefore, we automatically fall back to standard OpenAI or Google Gemini.
+        if settings.openai_api_key:
+            llm_config = {
+                "model": "gpt-4o-mini",
+                "provider": "User",
+                "apiKey": settings.openai_api_key,
+                "baseURL": "https://api.openai.com/v1",
+            }
+        elif settings.gemini_api_key:
+            llm_config = {
+                "model": "gemini-1.5-flash",
+                "provider": "User",
+                "apiKey": settings.gemini_api_key,
+                "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+            }
+        else:
+            llm_config = {
+                "model": settings.call_llm_model_openai,
+                "provider": "User",
+                "apiKey": settings.openai_api_key,
+                "baseURL": "https://api.openai.com/v1",
+            }
+    else:
+        llm_config = {
+            "model": llm_model or settings.call_llm_model_openai,
+            "provider": "User",
+            "apiKey": settings.openai_api_key,
+            "baseURL": "https://api.openai.com/v1",
+        }
+
+    system_prompt = (assistant.prompt or "").rstrip() + _AUTO_LANGUAGE_LOCK
+
+    return {
+        "faceId": face_id,
+        "ttsProvider": tts_provider_simli,
+        "ttsAPIKey": tts_api_key,
+        "voiceId": tts_voice_id,
+        "systemPrompt": system_prompt,
+        "firstMessage": assistant.first_message or "",
+        "maxSessionLength": 3600,
+        "maxIdleTime": 90,
+        "language": (assistant.language or "en"),
+        "llmConfig": llm_config,
+        "createTranscript": False,
+        # Intentionally omitting "model" so Simli picks its current
+        # default lipsync engine — always rides the latest.
+    }
+
+
 @app.post("/{tenant_id}/calls", response_model=S.AssistantCallResponse)
 async def start_call(
     payload: S.AssistantCallCreate,
     ctx: TenantContext = Depends(tenant_ctx),
 ) -> S.AssistantCallResponse:
-    if not (
-        settings.livekit_url
-        and settings.livekit_api_key
-        and settings.livekit_api_secret
-    ):
-        raise HTTPException(status_code=500, detail="LiveKit credentials are missing")
-
     assistant = await repo.get_assistant(ctx.session, payload.assistant_id)
     if assistant is None:
         raise HTTPException(status_code=404, detail="Assistant not found")
@@ -1927,6 +2020,57 @@ async def start_call(
 
     avatar_image_url = avatar.image_url
 
+    common_response = dict(
+        assistant=S.CallAssistant(
+            id=assistant.id,
+            name=assistant.name,
+            first_message=assistant.first_message,
+        ),
+        avatar=S.CallAvatar(
+            id=avatar.id,
+            face_id=avatar.face_id,
+            image_url=avatar_image_url,
+        ),
+        voice=S.CallVoice(
+            provider=assistant.voice_provider,
+            voice_id=assistant.voice_id,
+            name=voice_name,
+            preview_url=voice_preview_url,
+        ),
+    )
+
+    # ── Simli Auto (no LiveKit) ──
+    if settings.simli_transport == "auto":
+        if not settings.simli_api_key:
+            raise HTTPException(status_code=500, detail="SIMLI_API_KEY is missing")
+        if not avatar.face_id:
+            raise HTTPException(status_code=409, detail="Avatar has no face_id")
+
+        auto_payload = _build_simli_auto_payload(assistant, avatar.face_id)
+        try:
+            result = await start_auto_session(settings.simli_api_key, auto_payload)
+        except SimliError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        room_url = str(result.get("roomUrl") or "")
+        session_id = str(result.get("sessionId") or "")
+        if not room_url:
+            raise HTTPException(status_code=502, detail=f"Simli Auto returned no roomUrl: {result}")
+
+        return S.AssistantCallResponse(
+            transport="auto",
+            simli_auto=S.CallSimliAuto(room_url=room_url, session_id=session_id),
+            **common_response,
+        )
+
+    # ── LiveKit (default) ──
+    if not (
+        settings.livekit_url
+        and settings.livekit_api_key
+        and settings.livekit_api_secret
+    ):
+        raise HTTPException(status_code=500, detail="LiveKit credentials are missing")
+
     room_name = f"assistant-{payload.assistant_id}-{uuid4().hex[:8]}"
     identity = f"user-{uuid4().hex[:8]}"
     room_config = build_agent_dispatch_room_config(
@@ -1944,28 +2088,14 @@ async def start_call(
     )
 
     return S.AssistantCallResponse(
+        transport="livekit",
         livekit=S.CallLivekit(
             url=settings.livekit_url,
             token=token,
             room=room_name,
             identity=identity,
         ),
-        assistant=S.CallAssistant(
-            id=assistant.id,
-            name=assistant.name,
-            first_message=assistant.first_message,
-        ),
-        avatar=S.CallAvatar(
-            id=avatar.id,
-            face_id=avatar.face_id,
-            image_url=avatar_image_url,
-        ),
-        voice=S.CallVoice(
-            provider=assistant.voice_provider,
-            voice_id=assistant.voice_id,
-            name=voice_name,
-            preview_url=voice_preview_url,
-        ),
+        **common_response,
     )
 
 

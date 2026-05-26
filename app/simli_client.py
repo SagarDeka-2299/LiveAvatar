@@ -171,6 +171,27 @@ async def delete_face(api_key: str, face_id: str) -> None:
     raise SimliError(f"Simli delete face failed ({legacy_response.status_code}): {payload}")
 
 
+async def start_auto_session(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /auto/start/configurable — one-shot Simli Auto session.
+
+    Returns ``{"roomUrl": ..., "sessionId": ...}``. ``roomUrl`` is a Daily
+    room URL the frontend joins via the Daily JS SDK.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "x-simli-api-key": api_key,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            f"{SIMLI_BASE_URL}/auto/start/configurable",
+            headers=headers,
+            json=payload,
+        )
+    if response.status_code >= 400:
+        raise SimliError(f"Simli auto-session start failed ({response.status_code}): {response.text}")
+    return response.json()
+
+
 async def list_auto_agents(api_key: str) -> list[dict[str, Any]]:
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(

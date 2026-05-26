@@ -74,7 +74,7 @@ let pollTimer=null;
 // Short-burst follow-up timer used by refreshAll() to re-poll a little
 // sooner than the 3s startPolling tick when a background task is mid-flight.
 let studioTimer=null;
-let lkRoom=null,_pendingDelete=null;
+let _pendingDelete=null;
 
 const $=id=>document.getElementById(id);
 
@@ -1697,141 +1697,130 @@ $("delete-confirm-btn").addEventListener("click",async()=>{
   }catch(e){alert("Delete failed: "+e.message);}finally{$("delete-confirm-btn").disabled=false;}
 });
 
-/* ── Call (LiveKit) ── */
+/* ── Call (Simli Auto via Daily) ── */
 function setCallMode(m){$("call-shell").hidden=m!=="fullscreen";$("floating-call").hidden=m!=="floating";}
 function setCallWaiting(show,msg){const el=$("call-waiting");if(!el)return;el.hidden=!show;if(msg)el.textContent=msg;}
 
-function attachTrack(pub, participant){
-  const track = pub.track;
+let dailyCall=null;
+
+// Attach a single Daily remote track to its corresponding DOM element.
+// Called from the `track-started` event so we attach the MOMENT the
+// track becomes available — waiting for `participant-updated` adds
+// ~100-300ms of head-of-audio cut-off because the avatar starts
+// speaking firstMessage immediately on join.
+function _dailyAttachTrack(track, kind){
   if (!track) return;
-  
-  const vid = $("call-video");
-  if (!vid) return;
-
-  // ONLY attach audio/video from the Simli avatar agent to guarantee absolute synchronization
-  const isSimli = participant && (participant.identity === "simli-avatar-agent" || participant.identity?.startsWith("simli-"));
-  if (!isSimli) {
-    console.log("Ignoring non-Simli track:", track.kind, "from", participant?.identity);
-    return;
-  }
-
-  if (track.kind === "video") {
+  if (kind === "video") {
+    const vid = $("call-video");
+    if (!vid) return;
+    if (vid.srcObject?.getTracks().includes(track)) return;
+    vid.srcObject = new MediaStream([track]);
+    vid.play().catch(e => console.warn("[Simli/Daily] video play() blocked:", e?.message));
     setCallWaiting(false);
-  }
-
-  // Find all subscribed remote tracks in the room from the Simli agent
-  let remoteVideoTrack = null;
-  let remoteAudioTrack = null;
-
-  if (lkRoom) {
-    lkRoom.remoteParticipants.forEach(p => {
-      if (p.identity === "simli-avatar-agent" || p.identity?.startsWith("simli-")) {
-        p.trackPublications.forEach(publication => {
-          if (publication.isSubscribed && publication.track) {
-            if (publication.track.kind === "video") {
-              remoteVideoTrack = publication.track;
-            } else if (publication.track.kind === "audio") {
-              remoteAudioTrack = publication.track;
-            }
-          }
-        });
-      }
-    });
-  }
-
-  // Fallback to the current track if not found in participant loop
-  if (!remoteVideoTrack && track.kind === "video") remoteVideoTrack = track;
-  if (!remoteAudioTrack && track.kind === "audio") remoteAudioTrack = track;
-
-  // Combine tracks into a single MediaStream to guarantee absolute hardware-level synchronization
-  const tracksToCombine = [];
-  if (remoteVideoTrack && remoteVideoTrack.mediaStreamTrack) {
-    tracksToCombine.push(remoteVideoTrack.mediaStreamTrack);
-  }
-  if (remoteAudioTrack && remoteAudioTrack.mediaStreamTrack) {
-    tracksToCombine.push(remoteAudioTrack.mediaStreamTrack);
-  }
-
-  if (tracksToCombine.length > 0) {
-    // Check if the current srcObject is already a MediaStream containing these tracks
-    // to avoid unnecessary re-assignments that cause video flickering or audio pops.
-    const currentStream = vid.srcObject;
-    let needsUpdate = true;
-    
-    if (currentStream instanceof MediaStream) {
-      const currentTracks = currentStream.getTracks();
-      if (currentTracks.length === tracksToCombine.length) {
-        const matchesAll = currentTracks.every(t => tracksToCombine.includes(t));
-        if (matchesAll) {
-          needsUpdate = false;
-        }
-      }
-    }
-
-    if (needsUpdate) {
-      vid.srcObject = new MediaStream(tracksToCombine);
-      vid.play().catch(err => console.log("Video play failed:", err));
-    }
+  } else if (kind === "audio") {
+    const aud = $("call-audio");
+    if (!aud) return;
+    if (aud.srcObject?.getTracks().includes(track)) return;
+    aud.srcObject = new MediaStream([track]);
+    aud.play().catch(e => console.warn("[Simli/Daily] audio play() blocked:", e?.message));
   }
 }
 
-function detachTrack(pub, participant){
-  const track = pub.track;
-  if (!track) return;
-  
-  const vid = $("call-video");
-  if (!vid) return;
+// Late-arrival sweep: when our listeners wire up after the avatar has
+// already joined, the `track-started` event has fired and is gone. Walk
+// each remote participant's persistent tracks and attach what we missed.
+function _dailyAttachExistingTracks(call){
+  const participants = call.participants();
+  Object.values(participants).forEach(p => {
+    if (!p || p.local) return;
+    const vt = p.tracks?.video?.persistentTrack;
+    const at = p.tracks?.audio?.persistentTrack;
+    if (vt) _dailyAttachTrack(vt, "video");
+    if (at) _dailyAttachTrack(at, "audio");
+  });
+}
 
-  const isSimli = participant && (participant.identity === "simli-avatar-agent" || participant.identity?.startsWith("simli-"));
-  if (!isSimli) return;
+async function _launchSimliAutoCall(data){
+  if(!window.Daily){throw new Error("Daily SDK not loaded yet — try again in a moment.");}
 
-  // Detach using standard LiveKit routine
-  try {
-    track.detach(vid);
-  } catch (e) {
-    console.warn("Track detach failed:", e);
-  }
+  // Daily's documented property names are `audioSource` / `videoSource`
+  // (not `audio` / `video`). Setting them on the call object makes them
+  // the policy for the entire call — startCamera + join inherit, no
+  // webcam is ever requested.
+  const call=window.Daily.createCallObject({
+    audioSource: true,
+    videoSource: false,
+  });
+  dailyCall=call;
 
-  // Re-combine any remaining remote tracks from the Simli agent in the room
-  let remainingVideo = null;
-  let remainingAudio = null;
+  call.on("joined-meeting", ev => {
+    const localAudio = ev.participants?.local?.tracks?.audio?.state;
+    console.log("[Simli/Daily] joined-meeting; localAudioState=", localAudio,
+      "localId=", ev.participants?.local?.session_id);
+  });
+  call.on("participant-joined", ev => {
+    console.log("[Simli/Daily] participant-joined:",
+      ev.participant?.user_name || ev.participant?.session_id);
+  });
+  call.on("track-started", ev => {
+    if (ev.participant?.local) {
+      console.log("[Simli/Daily] local track-started:", ev.track?.kind);
+      return;
+    }
+    console.log("[Simli/Daily] remote track-started:", ev.track?.kind,
+      "from", ev.participant?.user_name || ev.participant?.session_id);
+    _dailyAttachTrack(ev.track, ev.track?.kind);
+  });
+  call.on("participant-left", ev => {
+    console.log("[Simli/Daily] participant-left:",
+      ev.participant?.user_name || ev.participant?.session_id);
+    const v=$("call-video"); if(v) try{v.srcObject=null;}catch{}
+    const a=$("call-audio"); if(a) try{a.srcObject=null;}catch{}
+  });
+  call.on("left-meeting", () => hangup());
+  call.on("error", e => { console.error("[Simli/Daily] error:", e); alert("Call error: "+(e?.errorMsg||"unknown")); hangup(); });
 
-  if (lkRoom) {
-    lkRoom.remoteParticipants.forEach(p => {
-      if (p.identity === "simli-avatar-agent" || p.identity?.startsWith("simli-")) {
-        p.trackPublications.forEach(publication => {
-          if (publication.isSubscribed && publication.track && publication.track !== track) {
-            if (publication.track.kind === "video") {
-              remainingVideo = publication.track;
-            } else if (publication.track.kind === "audio") {
-              remainingAudio = publication.track;
-            }
-          }
-        });
-      }
-    });
-  }
+  // Active-speaker fires when ANY participant becomes the dominant
+  // speaker. If the local id is reported when you talk, your mic IS
+  // publishing audio that Simli is receiving.
+  call.on("active-speaker-change", ev => {
+    const localId = dailyCall?.participants?.().local?.session_id;
+    const who = ev.activeSpeaker?.peerId;
+    console.log("[Simli/Daily] active-speaker:", who, who === localId ? "(you)" : "(avatar)");
+  });
 
-  const tracksToCombine = [];
-  if (remainingVideo && remainingVideo.mediaStreamTrack) {
-    tracksToCombine.push(remainingVideo.mediaStreamTrack);
-  }
-  if (remainingAudio && remainingAudio.mediaStreamTrack) {
-    tracksToCombine.push(remainingAudio.mediaStreamTrack);
-  }
+  // Simli broadcasts pipeline state via Daily app-messages. This is the
+  // single most useful diagnostic for "welcome plays but no response":
+  //   ApplicationState: 0 → 👂 Listening (waiting for user speech)
+  //   ApplicationState: 1 → 💡 Thinking  (LLM in flight)
+  //   ApplicationState: 2 → 💭 Talking   (TTS streaming back)
+  // If the avatar stays in 0 after you speak → your mic isn't reaching
+  // STT. If it goes 0→1 but never 2 → LLM call is failing server-side.
+  call.on("app-message", ev => {
+    const raw = ev.data;
+    let label = raw;
+    if (raw === "ApplicationState: 0") label = "👂 LISTENING";
+    else if (raw === "ApplicationState: 1") label = "💡 THINKING";
+    else if (raw === "ApplicationState: 2") label = "💭 TALKING";
+    console.log("[Simli/Daily] app-message:", label);
+  });
 
-  if (tracksToCombine.length > 0) {
-    vid.srcObject = new MediaStream(tracksToCombine);
-    vid.play().catch(() => {});
-  } else {
-    vid.srcObject = null;
-  }
+  // Inputs are already fixed by createCallObject(), so join with just the URL.
+  await call.join({url:data.simli_auto.room_url});
+  _dailyAttachExistingTracks(call);
+
+  // Confirmation log a moment after join — if localAudioState is
+  // "playable" the mic is publishing; anything else means STT is silent.
+  setTimeout(() => {
+    const local = dailyCall?.participants?.().local;
+    console.log("[Simli/Daily] post-join check:",
+      "localAudioState=", local?.tracks?.audio?.state,
+      "localVideoState=", local?.tracks?.video?.state);
+  }, 1500);
 }
 
 async function launchCall(){
   const asst=getAssistant();if(!asst)return;
-  if(!window.LivekitClient){alert("LiveKit client not loaded yet — try again in a moment.");return;}
-  const {Room,RoomEvent,Track}=window.LivekitClient;
   try{
     const _r=await fetch(`/${TENANT_ID}/calls`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({assistant_id:asst.id})});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"call create failed");
@@ -1839,39 +1828,15 @@ async function launchCall(){
     $("call-title").textContent=asst.name;
     setCallMode("fullscreen");setCallWaiting(true,"Connecting…");
 
-    const room=new Room({adaptiveStream:true,dynacast:true});
-    lkRoom=room;
-
-    room.on(RoomEvent.TrackSubscribed,(track,pub,participant)=>{
-      if(participant?.isLocal)return;
-      attachTrack(pub, participant);
-    });
-    room.on(RoomEvent.TrackUnsubscribed,(track,pub,participant)=>{
-      if(participant?.isLocal)return;
-      detachTrack(pub, participant);
-    });
-    room.on(RoomEvent.ParticipantConnected,p=>{
-      if(p.isAgent||p.identity?.startsWith("agent-")||p.kind==="agent"){setCallWaiting(true,"Agent joining…");}
-    });
-    room.on(RoomEvent.Disconnected,()=>hangup());
-
-    try{
-      const probe=await navigator.mediaDevices.getUserMedia({audio:true});
-      probe.getTracks().forEach(t=>t.stop());
-    }catch(micErr){
-      const isDenied=micErr.name==="NotAllowedError"||/permission|denied/i.test(micErr.message||"");
-      throw new Error(isDenied
-        ? "Microphone access is blocked. Click the lock/info icon in the address bar → Site settings → allow Microphone, then reload."
-        : "Microphone unavailable: "+(micErr.message||micErr.name||"unknown error"));
+    if(data.transport==="auto" && data.simli_auto){
+      await _launchSimliAutoCall(data);
+    } else {
+      throw new Error(
+        "Frontend only supports the Simli Auto transport. "
+        + "Set SIMLI_TRANSPORT=auto on the API and restart. "
+        + "(Received transport: "+(data.transport||"(none)")+")"
+      );
     }
-
-    // /calls now returns { livekit:{url,token,room,identity}, assistant, avatar, voice }
-    await room.connect(data.livekit.url,data.livekit.token);
-    await room.localParticipant.setMicrophoneEnabled(true);
-
-    room.remoteParticipants.forEach(p=>{
-      p.trackPublications.forEach(pub=>{if(pub.isSubscribed&&pub.track)attachTrack(pub, p);});
-    });
   }catch(e){console.error(e);alert("Call failed: "+e.message);hangup();}
 }
 
@@ -1887,9 +1852,11 @@ $("restore-call-btn").addEventListener("click",()=>{
 });
 
 function hangup(){
-  try{lkRoom?.disconnect();}catch{}
-  lkRoom=null;
+  try{dailyCall?.leave();}catch{}
+  try{dailyCall?.destroy();}catch{}
+  dailyCall=null;
   const v=$("call-video");if(v){try{v.srcObject=null;}catch{}}
+  const a=$("call-audio");if(a){try{a.srcObject=null;}catch{}}
   setCallWaiting(true,"Connecting…");
   setCallMode("hidden");
 }

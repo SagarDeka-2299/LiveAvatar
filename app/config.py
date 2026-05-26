@@ -16,6 +16,17 @@ class Settings:
     livekit_api_secret: str = os.getenv("LIVEKIT_API_SECRET", "")
     simli_api_key: str = os.getenv("SIMLI_API_KEY", "")
 
+    # ── Call transport ──
+    # "livekit": agent worker bridges TTS to Simli via a LiveKit room.
+    # "auto": call /auto/start/configurable on Simli — Simli hosts the
+    #   full STT/LLM/TTS/lipsync pipeline and the frontend joins a Daily
+    #   room. No agent worker involved on this call. STT is fixed to
+    #   Simli's internal provider; TTS supports ElevenLabs/Cartesia/PlayHT
+    #   only (others fall back to the ElevenLabs default voice).
+    # The lipsync model is left to Simli's server default so we always
+    # ride their latest (currently artalk).
+    simli_transport: str = os.getenv("SIMLI_TRANSPORT", "livekit").lower()
+
     # ── AI provider keys ──
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")

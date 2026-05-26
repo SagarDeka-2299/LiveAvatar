@@ -330,21 +330,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
     from livekit.plugins import simli
 
-    # Monkey-patch SimliConfig to force High Quality stream, SyncAudio, and Trinity Avatar options
-    if not hasattr(simli.SimliConfig, "_patched_for_hq"):
-        _original_create_json = simli.SimliConfig.create_json
-        def _patched_create_json(self):
-            res = _original_create_json(self)
-            res["isHighQuality"] = True
-            res["syncAudio"] = True
-            res["is_trinity_avatar"] = True
-            res["isTrinityAvatar"] = True
-            res["isTrinity"] = True
-            return res
-        simli.SimliConfig.create_json = _patched_create_json
-        simli.SimliConfig._patched_for_hq = True
+    # Trinity selection is already signaled by faceId/emotionId in the
+    # plugin's SimliConfig.create_json(). The /compose/token API only
+    # honors: faceId, apiVersion, sessionAggregator, handleSilence,
+    # maxSessionLength, maxIdleTime, startFrame, audioInputFormat.
+    # Extra "syncAudio"/"isHighQuality"/"isTrinity" flags were no-ops.
 
-    _SIMLI_IDENTITY = "simli-avatar-agent"
+    avatar = None
     for attempt in range(1, 4):
         avatar = simli.AvatarSession(
             simli_config=simli.SimliConfig(
@@ -356,14 +348,15 @@ async def entrypoint(ctx: JobContext) -> None:
             )
         )
         await avatar.start(session, ctx.room)
-        await asyncio.sleep(3)
-        if _SIMLI_IDENTITY in ctx.room.remote_participants:
+        try:
+            await avatar.wait_for_join(timeout=15)
             break
-        if attempt < 3:
-            logger.warning("Simli avatar not connected (attempt %d/3), retrying in 5s…", attempt)
-            await asyncio.sleep(5)
-        else:
+        except asyncio.TimeoutError:
+            if attempt < 3:
+                logger.warning("Simli avatar not connected (attempt %d/3), retrying…", attempt)
+                continue
             logger.error("Simli avatar failed to connect after 3 attempts, continuing voice-only")
+            avatar = None
 
     from livekit.agents.voice.room_io import RoomOptions
     await session.start(

@@ -3,7 +3,8 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 WORKDIR /app
 
 ENV UV_LINK_MODE=copy \
-    UV_HTTP_TIMEOUT=120 \
+    UV_HTTP_TIMEOUT=600 \
+    UV_CONCURRENT_DOWNLOADS=4 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

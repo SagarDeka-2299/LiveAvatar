@@ -296,6 +296,13 @@ class CallLivekit(BaseModel):
     identity: str
 
 
+class CallSimliAuto(BaseModel):
+    """Direct Simli Auto path — frontend joins Daily, no LiveKit involved."""
+
+    room_url: str
+    session_id: str
+
+
 class CallAssistant(BaseModel):
     id: int
     name: str
@@ -316,7 +323,10 @@ class CallVoice(BaseModel):
 
 
 class AssistantCallResponse(BaseModel):
-    livekit: CallLivekit
+    # Exactly one of these is populated, decided by SIMLI_TRANSPORT.
+    transport: Literal["livekit", "auto"] = "livekit"
+    livekit: CallLivekit | None = None
+    simli_auto: CallSimliAuto | None = None
     assistant: CallAssistant
     avatar: CallAvatar
     voice: CallVoice

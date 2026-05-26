@@ -398,7 +398,7 @@ async function pollUntilDone(resource, id, tenantId) {
 
 ## Calling from a browser
 
-Minimal vanilla HTML that joins an assistant call using `livekit-client`, combining remote video and audio tracks into a unified `MediaStream` to guarantee frame-perfect lip-sync synchronization:
+Minimal vanilla HTML that joins an assistant call using `livekit-client`, capturing remote video and audio tracks specifically from the `"simli-avatar-agent"` participant to leverage WebRTC's native server-synchronized hardware clock:
 
 ```html
 <!doctype html>
@@ -420,55 +420,52 @@ async function startCall(assistantId) {
 
   const vidElement = document.getElementById("v");
 
-  function syncTracks() {
-    let videoTrack = null;
-    let audioTrack = null;
+  function attachParticipantTrack(pub, participant) {
+    const track = pub.track;
+    if (!track) return;
 
-    room.remoteParticipants.forEach(p => {
-      if (p.identity === "simli-avatar-agent") {
-        p.trackPublications.forEach(pub => {
-          if (pub.isSubscribed && pub.track) {
-            if (pub.track.kind === "video") videoTrack = pub.track;
-            else if (pub.track.kind === "audio") audioTrack = pub.track;
-          }
-        });
-      }
-    });
+    // Filter out non-Simli tracks to guarantee absolute server-side synchronization
+    const isSimli = participant && (participant.identity === "simli-avatar-agent");
+    if (!isSimli) return;
 
-    const tracks = [];
-    if (videoTrack?.mediaStreamTrack) tracks.push(videoTrack.mediaStreamTrack);
-    if (audioTrack?.mediaStreamTrack) tracks.push(audioTrack.mediaStreamTrack);
-
-    if (tracks.length > 0) {
-      const currentStream = vidElement.srcObject;
-      let needsUpdate = true;
-      if (currentStream instanceof MediaStream) {
-        const currentTracks = currentStream.getTracks();
-        if (currentTracks.length === tracks.length && currentTracks.every(t => tracks.includes(t))) {
-          needsUpdate = false;
-        }
-      }
-      if (needsUpdate) {
-        vidElement.srcObject = new MediaStream(tracks);
-        vidElement.play().catch(err => console.error("Play failed:", err));
-      }
+    if (track.kind === "video") {
+      track.attach(vidElement);
+    } else if (track.kind === "audio") {
+      track.attach();
     }
+  }
+
+  function detachParticipantTrack(pub, participant) {
+    const track = pub.track;
+    if (!track) return;
+
+    const isSimli = participant && (participant.identity === "simli-avatar-agent");
+    if (!isSimli) return;
+
+    track.detach();
   }
 
   room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
     if (participant.isLocal) return;
-    syncTracks();
+    attachParticipantTrack(pub, participant);
   });
 
-  room.on(RoomEvent.TrackUnsubscribed, () => {
-    syncTracks();
+  room.on(RoomEvent.TrackUnsubscribed, (track, pub, participant) => {
+    if (participant.isLocal) return;
+    detachParticipantTrack(pub, participant);
   });
 
   await room.connect(data.livekit.url, data.livekit.token);
   await room.localParticipant.setMicrophoneEnabled(true);
 
   // Sync any tracks already subscribed during connection
-  syncTracks();
+  room.remoteParticipants.forEach(p => {
+    p.trackPublications.forEach(pub => {
+      if (pub.isSubscribed && pub.track) {
+        attachParticipantTrack(pub, p);
+      }
+    });
+  });
 }
 </script>
 ```
