@@ -1872,12 +1872,18 @@ function startPolling(){
   if(pollTimer)clearInterval(pollTimer);
   pollTimer=setInterval(()=>{refreshAll().catch(()=>{});},3000);
 }
-// GET /presets — no tenant context (catalogue is global).
+// GET /presets/avatar and /presets/voice — no tenant context (catalogue is global).
 async function loadPresets(){
-  const r=await fetch("/presets");
-  const data=await r.json();
-  PRESETS=data.avatar_presets||[];
-  VOICE_PRESETS=data.voice_presets||[];
+  try {
+    const [r1, r2] = await Promise.all([
+      fetch("/presets/avatar"),
+      fetch("/presets/voice")
+    ]);
+    if(r1.ok) PRESETS = await r1.json();
+    if(r2.ok) VOICE_PRESETS = await r2.json();
+  } catch(e) {
+    console.error("Failed to load presets:", e);
+  }
 }
 
 // GET /personas?tenant_id=… — filters and pagination would go on the URL too,

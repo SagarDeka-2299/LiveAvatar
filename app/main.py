@@ -2234,6 +2234,20 @@ async def design_voice_standalone(
             gender=effective_gender,
         )
         voice_id = row.id
+        if persona_id:
+            await repo.update_persona_entity(
+                ctx.session,
+                persona_id,
+                voice_ref_id=voice_id,
+                voice_provider=settings.default_simli_voice_provider,
+                voice_id="",
+                voice_source="designed",
+                voice_description=initial_description,
+                voice_sample_url="",
+                voice_preview_url="",
+                voice_status="processing",
+                voice_last_error=None,
+            )
         snapshot = _voice_row_to_model(row)
 
     asyncio.create_task(
@@ -2334,6 +2348,32 @@ async def _run_standalone_voice_design(
                 status="ready",
                 last_error=None,
             )
+            # Propagate newly generated voice details to any persona and its assistants linked to this voice
+            personas = await repo.list_persona_entities(ctx.session)
+            for p in personas:
+                if p.voice_ref_id == voice_id:
+                    await repo.update_persona_entity(
+                        ctx.session,
+                        p.id,
+                        voice_id=el_voice_id,
+                        voice_provider=settings.default_simli_voice_provider,
+                        voice_source="designed",
+                        voice_description=description,
+                        voice_preview_url=preview_url,
+                        voice_status="ready",
+                        voice_last_error=None,
+                    )
+                    # Propagate to all assistants for this persona.
+                    assistants = await repo.list_assistants(ctx.session)
+                    for asst in assistants:
+                        if asst.persona_id == p.id:
+                            await repo.update_assistant(
+                                ctx.session,
+                                asst.id,
+                                voice_provider=settings.default_simli_voice_provider,
+                                voice_id=el_voice_id,
+                                voice_model=settings.tts_model,
+                            )
     except Exception as exc:
         async with open_background_context(tenant_id) as ctx:
             await repo.update_voice(
@@ -2376,6 +2416,20 @@ async def clone_voice_standalone(
             gender=persona_gender,
         )
         voice_id = row.id
+        if persona_id:
+            await repo.update_persona_entity(
+                ctx.session,
+                persona_id,
+                voice_ref_id=voice_id,
+                voice_provider=settings.default_simli_voice_provider,
+                voice_id="",
+                voice_source="cloned",
+                voice_description="",
+                voice_sample_url="",
+                voice_preview_url="",
+                voice_status="processing",
+                voice_last_error=None,
+            )
         snapshot = _voice_row_to_model(row)
 
     asyncio.create_task(
@@ -2457,6 +2511,32 @@ async def _run_standalone_voice_clone(
                 status="ready",
                 last_error=None,
             )
+            # Propagate newly cloned voice details to any persona and its assistants linked to this voice
+            personas = await repo.list_persona_entities(ctx.session)
+            for p in personas:
+                if p.voice_ref_id == voice_id:
+                    await repo.update_persona_entity(
+                        ctx.session,
+                        p.id,
+                        voice_id=el_voice_id,
+                        voice_provider=settings.default_simli_voice_provider,
+                        voice_source="cloned",
+                        voice_description="Cloned voice",
+                        voice_preview_url=preview_url,
+                        voice_status="ready",
+                        voice_last_error=None,
+                    )
+                    # Propagate to all assistants for this persona.
+                    assistants = await repo.list_assistants(ctx.session)
+                    for asst in assistants:
+                        if asst.persona_id == p.id:
+                            await repo.update_assistant(
+                                ctx.session,
+                                asst.id,
+                                voice_provider=settings.default_simli_voice_provider,
+                                voice_id=el_voice_id,
+                                voice_model=settings.tts_model,
+                            )
     except Exception as exc:
         async with open_background_context(tenant_id) as ctx:
             await repo.update_voice(
