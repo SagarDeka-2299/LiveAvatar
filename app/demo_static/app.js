@@ -1033,11 +1033,13 @@ function initPersonaView(){
   const avName=$("av-name-input");if(avName)avName.value=p.name;
   setStatus($("av-status"),"");
   // Set up voice drop slot
-  setupPvVoiceDropSlot(p);
+  setupPvVoiceDropSlot(p, true);
 }
 
-function setupPvVoiceDropSlot(p){
-  pvDroppedVoiceId=p.voice_ref_id?p.voice_ref_id:null;
+function setupPvVoiceDropSlot(p, initValue=false){
+  if(initValue){
+    pvDroppedVoiceId=p.voice_ref_id?p.voice_ref_id:null;
+  }
   renderPvVoiceSlot();
   const slot=$("pv-voice-drop-slot");if(!slot)return;
   slot.ondragover=e=>{e.preventDefault();slot.classList.add("drag-over");};
@@ -1899,7 +1901,13 @@ async function loadStudio(){
   if(voice_ref_id) url += `voice_ref_id=${voice_ref_id}&`;
   if(has_avatars) url += `has_avatars=${has_avatars}&`;
   const r=await fetch(url);
-  studio=await r.json();
+  if(r.ok){
+    const list=await r.json();
+    studio=list.map(p=>{
+      const old=studio.find(x=>x.id===p.id);
+      return old?{...old,...p}:p;
+    });
+  }
 }
 
 async function loadAssistants(){
@@ -1947,9 +1955,12 @@ async function loadAllAvatars(){
 
 async function refreshAll(){
   await Promise.all([loadStudio(),loadAssistants(),loadVoices(),loadAvatars(),loadAllAvatars()]);
+  if(selectedPersonaId){
+    await fetchDetailedPersona(selectedPersonaId);
+  }
   renderAll();
-  // Re-init persona voice slot if persona edit is visible
-  if(!$("cv-persona")?.hidden){const p=getPersona();if(p)setupPvVoiceDropSlot(p);}
+  // Re-init persona voice slot if persona edit is visible (without overriding current draft selection)
+  if(!$("cv-persona")?.hidden){const p=getPersona();if(p)setupPvVoiceDropSlot(p, false);}
   const need=studio.some(p=>p.status&&p.status!=="ready")||selectedPersonaAvatars.some(a=>a.status==="processing"||a.status==="generating")||assistants.some(a=>a.status&&a.status!=="ready")||voices.some(v=>v.status==="processing");
   clearTimeout(studioTimer);if(need)studioTimer=setTimeout(()=>refreshAll().catch(()=>{}),6000);
 }
