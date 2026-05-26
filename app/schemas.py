@@ -66,6 +66,7 @@ class PersonaEntity(BaseModel):
     progress: int = 0
     stage: str = "queued"
     last_error: str | None = None
+    voice_ref_id: int | None = None
     voice_provider: str = ""
     voice_id: str = ""
     voice_source: str = ""

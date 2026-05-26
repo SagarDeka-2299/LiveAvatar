@@ -724,6 +724,7 @@ def _persona_row_to_model(
         progress=row.progress,
         stage=row.stage,
         last_error=row.last_error,
+        voice_ref_id=row.voice_ref_id,
         voice_provider=row.voice_provider,
         voice_id=row.voice_id,
         voice_source=row.voice_source,
@@ -1116,8 +1117,8 @@ async def patch_persona(
     fields: dict[str, Any] = {}
     if payload.name is not None:
         fields["name"] = payload.name
-    if payload.voice_ref_id is not None:
-        if payload.voice_ref_id == 0:
+    if "voice_ref_id" in payload.model_fields_set:
+        if payload.voice_ref_id is None or payload.voice_ref_id == 0:
             fields.update(
                 voice_ref_id=None,
                 voice_provider="",

@@ -1414,7 +1414,7 @@ function renderNavPersonaSlot(){
   }
   const p=studio.find(x=>x.id===navDroppedPersonaId);
   if(!p){navDroppedPersonaId=null;return renderNavPersonaSlot();}
-  slot.innerHTML=`<img class="slot-thumb" src="${esc(p.image_url||PLACEHOLDER)}" alt=""/><b>${esc(p.name)}</b><span class="drop-hint" style="margin-left:auto">${esc(p.gender||"unknown")}</span>`;
+  slot.innerHTML=`<img class="slot-thumb" src="${esc(p.image_url||PLACEHOLDER)}" alt=""/><b>${esc(p.name)}</b><span class="drop-hint" style="margin-left:auto">${esc(p.gender||"unknown")}</span><button type="button" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;margin-left:12px;padding:0" title="Clear" onclick="navDroppedPersonaId=null;renderNavPersonaSlot();renderNavPresets();renderNavPromptPreview();">✕</button>`;
   if(btn)btn.disabled=false;
 }
 function renderNavPromptPreview(){
@@ -1496,7 +1496,7 @@ function renderNaAvatarSlot(){
   let av=null,ownerPersona=null;
   for(const p of studio){const found=(p.avatars||[]).find(a=>a.id===naDroppedAvatarId);if(found){av=found;ownerPersona=p;break;}}
   if(!av){naDroppedAvatarId=null;return renderNaAvatarSlot();}
-  slot.innerHTML=`<img class="slot-thumb" src="${esc(av.image_url||PLACEHOLDER)}" alt=""/><b>${esc(av.name)}</b><span class="drop-hint" style="margin-left:auto">via ${esc(ownerPersona?.name||"")}</span>`;
+  slot.innerHTML=`<img class="slot-thumb" src="${esc(av.image_url||PLACEHOLDER)}" alt=""/><b>${esc(av.name)}</b><span class="drop-hint" style="margin-left:auto">via ${esc(ownerPersona?.name||"")}</span><button type="button" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;margin-left:12px;padding:0" title="Clear" onclick="naDroppedAvatarId=null;renderNaAvatarSlot()">✕</button>`;
   if(btn)btn.disabled=false;
 }
 function initNewAssistantView(){
