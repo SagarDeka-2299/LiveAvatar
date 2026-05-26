@@ -1,11 +1,13 @@
 # Lili Studio API
 
 A multi-tenant FastAPI service that turns a user-supplied portrait + voice
-into a real-time AI assistant joinable as a LiveKit room. Every business
-route is mounted under the `/{tenant_id}/...` prefix; the tenancy layer
-resolves that tenant's Postgres database and Azure Blob credentials from
-Azure Key Vault per request. A working reference front-end is mounted at
-`/demo`.
+into a real-time AI assistant. The call transport is env-selectable: a
+LiveKit room driven by an in-process agent worker (`SIMLI_TRANSPORT=livekit`),
+or a Simli-hosted Daily room where Simli runs the whole STT/LLM/TTS
+pipeline (`SIMLI_TRANSPORT=auto`). Every business route is mounted under
+the `/{tenant_id}/...` prefix; the tenancy layer resolves that tenant's
+Postgres database and Azure Blob credentials from Azure Key Vault per
+request. A working reference front-end is mounted at `/demo`.
 
 ---
 
@@ -365,18 +367,32 @@ All routes return JSON unless noted. List endpoints accept `limit`
 
 #### `POST /{tenant_id}/calls`
 - **Body**: `{ assistant_id }`
-- **Resp** (single plug-and-play payload):
+- **Resp** (discriminated by `transport`, set by `SIMLI_TRANSPORT`):
 
   ```jsonc
+  // transport = "livekit"  (SIMLI_TRANSPORT=livekit)
   {
+    "transport": "livekit",
     "livekit":   { "url": "wss://…", "token": "eyJ…", "room": "…", "identity": "…" },
     "assistant": { "id": 42, "name": "Maya", "first_message": "Hi…" },
     "avatar":    { "id": 7,  "face_id": "simli_xxx", "image_url": "https://…" },
     "voice":     { "provider": "elevenlabs", "voice_id": "21m00…", "name": "Rachel", "preview_url": "https://…" }
   }
+
+  // transport = "auto"  (SIMLI_TRANSPORT=auto)
+  {
+    "transport":  "auto",
+    "simli_auto": { "room_url": "https://<sub>.daily.co/<room>", "session_id": "…" },
+    "assistant":  { "id": 42, "name": "Maya", "first_message": "Hi…" },
+    "avatar":     { "id": 7,  "face_id": "simli_xxx", "image_url": "https://…" },
+    "voice":      { "provider": "elevenlabs", "voice_id": "21m00…", "name": "Rachel", "preview_url": "https://…" }
+  }
   ```
 
-- **UI use**: pressing the "Call" button on an assistant. Use `livekit.url` + `livekit.token` to join the room; the agent worker on the backend connects in parallel and publishes the lip-synced avatar video + voice audio. The other fields are display metadata for the call shell.
+- **UI use**: pressing the "Call" button on an assistant.
+  - On `livekit`, use `livekit.url` + `livekit.token` to join the room with `livekit-client`; the agent worker on the backend connects in parallel and publishes the lip-synced avatar video + voice audio.
+  - On `auto`, join `simli_auto.room_url` with `@daily-co/daily-js`; Simli hosts STT/LLM/TTS server-side and publishes the avatar tracks into that Daily room. No backend worker runs for the call.
+  - `assistant` / `avatar` / `voice` are display metadata for the call shell in both cases.
 
 ---
 
@@ -400,7 +416,11 @@ async function pollUntilDone(resource, id, tenantId) {
 
 ## Calling from a browser
 
-Minimal vanilla HTML that joins an assistant call using `livekit-client`, capturing remote video and audio tracks specifically from the `"simli-avatar-agent"` participant to leverage WebRTC's native server-synchronized hardware clock:
+The client picks its SDK based on `transport` in the `/calls` response.
+
+### `transport: "livekit"`
+
+Use `livekit-client`. Filter remote tracks to the `"simli-avatar-agent"` participant so video and audio share Simli's server-synchronized hardware clock.
 
 ```html
 <!doctype html>
@@ -419,55 +439,59 @@ async function startCall(assistantId) {
 
   const { Room, RoomEvent } = window.LivekitClient;
   const room = new Room({ adaptiveStream: true });
-
   const vidElement = document.getElementById("v");
 
-  function attachParticipantTrack(pub, participant) {
+  function attach(pub, participant) {
     const track = pub.track;
-    if (!track) return;
-
-    // Filter out non-Simli tracks to guarantee absolute server-side synchronization
-    const isSimli = participant && (participant.identity === "simli-avatar-agent");
-    if (!isSimli) return;
-
-    if (track.kind === "video") {
-      track.attach(vidElement);
-    } else if (track.kind === "audio") {
-      track.attach();
-    }
+    if (!track || participant.identity !== "simli-avatar-agent") return;
+    if (track.kind === "video") track.attach(vidElement);
+    else if (track.kind === "audio") track.attach();
   }
 
-  function detachParticipantTrack(pub, participant) {
-    const track = pub.track;
-    if (!track) return;
-
-    const isSimli = participant && (participant.identity === "simli-avatar-agent");
-    if (!isSimli) return;
-
-    track.detach();
-  }
-
-  room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
-    if (participant.isLocal) return;
-    attachParticipantTrack(pub, participant);
-  });
-
-  room.on(RoomEvent.TrackUnsubscribed, (track, pub, participant) => {
-    if (participant.isLocal) return;
-    detachParticipantTrack(pub, participant);
-  });
+  room.on(RoomEvent.TrackSubscribed, (_t, pub, p) => { if (!p.isLocal) attach(pub, p); });
+  room.on(RoomEvent.TrackUnsubscribed, (_t, pub, p) => { pub.track?.detach(); });
 
   await room.connect(data.livekit.url, data.livekit.token);
   await room.localParticipant.setMicrophoneEnabled(true);
 
-  // Sync any tracks already subscribed during connection
-  room.remoteParticipants.forEach(p => {
-    p.trackPublications.forEach(pub => {
-      if (pub.isSubscribed && pub.track) {
-        attachParticipantTrack(pub, p);
-      }
-    });
+  room.remoteParticipants.forEach(p =>
+    p.trackPublications.forEach(pub => pub.isSubscribed && pub.track && attach(pub, p))
+  );
+}
+</script>
+```
+
+### `transport: "auto"`
+
+Join the Daily room returned in `simli_auto.room_url` with `@daily-co/daily-js`. Simli publishes the avatar tracks; the local mic must be enabled so Simli's server-side STT can hear the user.
+
+```html
+<!doctype html>
+<video id="v" autoplay playsinline></video>
+<audio id="a" autoplay playsinline></audio>
+<script src="https://unpkg.com/@daily-co/daily-js"></script>
+<script>
+const TENANT_ID = "local_tenant";
+
+async function startCall(assistantId) {
+  const r = await fetch(`/${TENANT_ID}/calls`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ assistant_id: assistantId }),
   });
+  const data = await r.json();
+
+  const call = window.Daily.createCallObject({ audioSource: true, videoSource: false });
+  const vidEl = document.getElementById("v");
+  const audEl = document.getElementById("a");
+
+  call.on("track-started", ({ track, participant }) => {
+    if (!participant || participant.local) return;
+    const el = track.kind === "video" ? vidEl : audEl;
+    el.srcObject = new MediaStream([track]);
+  });
+
+  await call.join({ url: data.simli_auto.room_url });
 }
 </script>
 ```
