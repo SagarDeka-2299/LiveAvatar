@@ -330,13 +330,16 @@ async def entrypoint(ctx: JobContext) -> None:
 
     from livekit.plugins import simli
 
-    # Monkey-patch SimliConfig to force High Quality stream and SyncAudio
+    # Monkey-patch SimliConfig to force High Quality stream, SyncAudio, and Trinity Avatar options
     if not hasattr(simli.SimliConfig, "_patched_for_hq"):
         _original_create_json = simli.SimliConfig.create_json
         def _patched_create_json(self):
             res = _original_create_json(self)
             res["isHighQuality"] = True
             res["syncAudio"] = True
+            res["is_trinity_avatar"] = True
+            res["isTrinityAvatar"] = True
+            res["isTrinity"] = True
             return res
         simli.SimliConfig.create_json = _patched_create_json
         simli.SimliConfig._patched_for_hq = True

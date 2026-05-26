@@ -86,19 +86,11 @@ async def upload_face_image(api_key: str, image_bytes: bytes, filename: str, fac
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 response = await client.post(
-                    f"{SIMLI_BASE_URL}/faces/legacy",
+                    f"{SIMLI_BASE_URL}/faces/trinity",
                     headers={"x-simli-api-key": api_key},
                     params={"face_name": face_name},
                     files=files,
                 )
-
-                if response.status_code == 404:
-                    response = await client.post(
-                        f"{SIMLI_BASE_URL}/generateFaceID",
-                        headers={"api-key": api_key},
-                        params={"face_name": face_name},
-                        files=files,
-                    )
 
             payload = _parse_json_response(response)
             if response.status_code >= 400:
@@ -116,7 +108,7 @@ async def upload_face_image(api_key: str, image_bytes: bytes, filename: str, fac
 async def get_face_generation_status(api_key: str, face_id: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
-            f"{SIMLI_BASE_URL}/faces/legacy/generation_status",
+            f"{SIMLI_BASE_URL}/faces/trinity/generation_status",
             headers={"x-simli-api-key": api_key},
             params={"face_id": face_id},
         )
