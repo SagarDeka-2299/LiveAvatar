@@ -104,6 +104,45 @@
         <span class="pane-action-hint">+ New</span>
       </div>
       <div class="section-body" id="voices-body">
+        <div class="list-header-row">
+          <button type="button" class="filter-toggle-btn" data-popup="voices-filter-popup">⚙ Filter</button>
+          <span class="active-filters-summary" id="voices-active-summary"></span>
+        </div>
+        <div id="voices-filter-popup" class="filter-popup" hidden>
+          <div class="filter-popup-header">
+            <span class="filter-popup-title">Voice Filters</span>
+            <button type="button" class="filter-popup-close" data-popup="voices-filter-popup">✕</button>
+          </div>
+          <div class="filter-popup-body">
+            <div class="filter-field">
+              <label for="filter-voices-gender">Gender</label>
+              <select id="filter-voices-gender" class="filter-select">
+                <option value="">All Genders</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-voices-source">Source</label>
+              <select id="filter-voices-source" class="filter-select">
+                <option value="">All Sources</option>
+                <option value="prompt">Prompt (Designed)</option>
+                <option value="clone">Clone (Cloned)</option>
+                <option value="library">Library (ElevenLabs)</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-voices-persona">Associated Persona</label>
+              <select id="filter-voices-persona" class="filter-select">
+                <option value="">All Personas</option>
+              </select>
+            </div>
+          </div>
+          <div class="filter-popup-footer">
+            <button type="button" id="btn-apply-voices" class="btn btn-primary btn-xs">Apply</button>
+            <button type="button" id="btn-reset-voices" class="btn btn-secondary btn-xs">Reset</button>
+          </div>
+        </div>
         <div id="left-voice-list" class="entity-list"><p class="pane-hint">No voices yet.</p></div>
       </div>
     </section>
@@ -119,6 +158,54 @@
         <span class="pane-action-hint">+ New</span>
       </div>
       <div class="section-body" id="personas-body">
+        <div class="list-header-row">
+          <button type="button" class="filter-toggle-btn" data-popup="personas-filter-popup">⚙ Filter</button>
+          <span class="active-filters-summary" id="personas-active-summary"></span>
+        </div>
+        <div id="personas-filter-popup" class="filter-popup" hidden>
+          <div class="filter-popup-header">
+            <span class="filter-popup-title">Persona Filters</span>
+            <button type="button" class="filter-popup-close" data-popup="personas-filter-popup">✕</button>
+          </div>
+          <div class="filter-popup-body">
+            <div class="filter-field">
+              <label for="filter-personas-gender">Gender</label>
+              <select id="filter-personas-gender" class="filter-select">
+                <option value="">All Genders</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-personas-status">Status</label>
+              <select id="filter-personas-status" class="filter-select">
+                <option value="">All Statuses</option>
+                <option value="ready">Ready</option>
+                <option value="processing">Processing</option>
+                <option value="failed">Failed</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-personas-voice">Voice</label>
+              <select id="filter-personas-voice" class="filter-select">
+                <option value="">All Voices</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-personas-has-avatars">Avatar Presence</label>
+              <select id="filter-personas-has-avatars" class="filter-select">
+                <option value="">All Avatars Filter</option>
+                <option value="true">Has Avatars</option>
+                <option value="false">No Avatars</option>
+              </select>
+            </div>
+          </div>
+          <div class="filter-popup-footer">
+            <button type="button" id="btn-apply-personas" class="btn btn-primary btn-xs">Apply</button>
+            <button type="button" id="btn-reset-personas" class="btn btn-secondary btn-xs">Reset</button>
+          </div>
+        </div>
         <div id="left-persona-list" class="entity-list"><p class="pane-hint">No personas yet.</p></div>
       </div>
     </section>
@@ -134,6 +221,43 @@
         <span class="pane-action-hint">+ New</span>
       </div>
       <div class="section-body" id="avatars-body">
+        <div class="list-header-row">
+          <button type="button" class="filter-toggle-btn" data-popup="avatars-filter-popup">⚙ Filter</button>
+          <span class="active-filters-summary" id="avatars-active-summary"></span>
+        </div>
+        <div id="avatars-filter-popup" class="filter-popup" hidden>
+          <div class="filter-popup-header">
+            <span class="filter-popup-title">Avatar Filters</span>
+            <button type="button" class="filter-popup-close" data-popup="avatars-filter-popup">✕</button>
+          </div>
+          <div class="filter-popup-body">
+            <div class="filter-field">
+              <label for="filter-avatars-status">Status</label>
+              <select id="filter-avatars-status" class="filter-select">
+                <option value="">All Statuses</option>
+                <option value="ready">Ready</option>
+                <option value="generating">Generating</option>
+                <option value="failed">Failed</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-avatars-persona">Associated Persona</label>
+              <select id="filter-avatars-persona" class="filter-select">
+                <option value="">All Personas</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-avatars-assistant">Associated Assistant</label>
+              <select id="filter-avatars-assistant" class="filter-select">
+                <option value="">All Assistants</option>
+              </select>
+            </div>
+          </div>
+          <div class="filter-popup-footer">
+            <button type="button" id="btn-apply-avatars" class="btn btn-primary btn-xs">Apply</button>
+            <button type="button" id="btn-reset-avatars" class="btn btn-secondary btn-xs">Reset</button>
+          </div>
+        </div>
         <p id="left-avatar-hint" class="pane-hint">Select a persona.</p>
         <div id="left-avatar-list" class="entity-list"></div>
       </div>
@@ -150,6 +274,37 @@
         <span class="pane-action-hint">+ New</span>
       </div>
       <div class="section-body" id="contacts-body">
+        <div class="list-header-row">
+          <button type="button" class="filter-toggle-btn" data-popup="contacts-filter-popup">⚙ Filter</button>
+          <span class="active-filters-summary" id="contacts-active-summary"></span>
+        </div>
+        <div id="contacts-filter-popup" class="filter-popup" hidden>
+          <div class="filter-popup-header">
+            <span class="filter-popup-title">Assistant Filters</span>
+            <button type="button" class="filter-popup-close" data-popup="contacts-filter-popup">✕</button>
+          </div>
+          <div class="filter-popup-body">
+            <div class="filter-field">
+              <label for="filter-assistants-status">Status</label>
+              <select id="filter-assistants-status" class="filter-select">
+                <option value="">All Statuses</option>
+                <option value="ready">Ready</option>
+                <option value="processing">Processing</option>
+                <option value="failed">Failed</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <label for="filter-assistants-avatar">Associated Avatar</label>
+              <select id="filter-assistants-avatar" class="filter-select">
+                <option value="">All Avatars</option>
+              </select>
+            </div>
+          </div>
+          <div class="filter-popup-footer">
+            <button type="button" id="btn-apply-assistants" class="btn btn-primary btn-xs">Apply</button>
+            <button type="button" id="btn-reset-assistants" class="btn btn-secondary btn-xs">Reset</button>
+          </div>
+        </div>
         <div id="left-contacts-list" class="entity-list contacts-list"><p class="pane-hint">No assistants yet.</p></div>
       </div>
     </section>
@@ -504,6 +659,52 @@
         <div id="vd-clone-actions" hidden>
           <button id="vd-clone-submit-btn" type="button" class="btn btn-primary btn-glow"><span class="btn-icon">🎙</span> Clone Voice</button>
         </div>
+      </div>
+    </div>
+
+    <!-- VOICE DETAILS -->
+    <div id="cv-voice" class="center-view" hidden>
+      <div class="cv-header">
+        <div class="cv-subject">
+          <div class="cv-thumb" style="background: linear-gradient(135deg,#1a1035,#2d1b69); display: grid; place-items: center; font-size: 26px;">🎙</div>
+          <div><span class="cv-kicker">Voice Profile</span><h2 id="vv-name"></h2><span id="vv-source-badge" class="voice-badge"></span></div>
+        </div>
+      </div>
+      <div class="cv-body">
+        <div class="field">
+          <label>Description / Design Prompt</label>
+          <div id="vv-description" style="padding:12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(255,255,255,.02); font-size:13px; line-height:1.5; color:var(--muted)"></div>
+        </div>
+        <div class="grid-2" style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px">
+          <div class="field">
+            <label>Voice Provider</label>
+            <div id="vv-provider" style="padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(255,255,255,.01); font-size:13px"></div>
+          </div>
+          <div class="field">
+            <label>ElevenLabs Voice ID</label>
+            <div id="vv-elevenlabs-id" style="padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(255,255,255,.01); font-size:13px; font-family:monospace; word-break:break-all"></div>
+          </div>
+        </div>
+        <div class="grid-2" style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px">
+          <div class="field">
+            <label>Created At</label>
+            <div id="vv-created-at" style="padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(255,255,255,.01); font-size:13px"></div>
+          </div>
+          <div class="field">
+            <label>Linked Persona</label>
+            <div id="vv-persona" style="padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(255,255,255,.01); font-size:13px"></div>
+          </div>
+        </div>
+        <div class="field" style="margin-top:20px">
+          <label>Voice Preview</label>
+          <div style="display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(245,158,11,.05)">
+            <button type="button" id="vv-play-btn" class="btn btn-primary btn-sm" style="padding:8px 16px">▶ Play Preview</button>
+            <span style="font-size:12px; color:var(--muted)">Listen to the ElevenLabs generated audio sample</span>
+          </div>
+        </div>
+      </div>
+      <div class="cv-actions">
+        <button id="vv-delete-btn" type="button" class="btn btn-danger">🗑 Delete Voice</button>
       </div>
     </div>
 

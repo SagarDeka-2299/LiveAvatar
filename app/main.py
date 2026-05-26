@@ -673,6 +673,21 @@ async def _fetch_url_bytes(url: str) -> bytes:
         return resp.content
 
 
+def _local_blob_to_base64_url(url: str) -> str:
+    if not url or "/local-blob/" not in url:
+        return url
+    try:
+        import base64
+        from app.local_storage import LocalBlobStore
+        key = url.split("/local-blob/", 1)[1].split("?", 1)[0]
+        store = LocalBlobStore(tenant_id=settings.local_tenant_id)
+        data, content_type = store.read_local(key)
+        encoded = base64.b64encode(data).decode("utf-8")
+        return f"data:{content_type};base64,{encoded}"
+    except Exception:
+        return url
+
+
 # ── SQLAlchemy → Pydantic serialisation ───────────────────────────────────────
 
 def _avatar_row_to_model(row: AvatarRow) -> S.PersonaAvatar:
@@ -684,11 +699,12 @@ def _avatar_row_to_model(row: AvatarRow) -> S.PersonaAvatar:
         theme_prompt=row.theme_prompt,
         preset_ids=_parse_preset_ids(row.preset_ids),
         face_id=row.face_id,
-        image_url=row.image_url,
+        image_url=_local_blob_to_base64_url(row.image_url),
         status=row.status,
         progress=row.progress,
         stage=row.stage,
         last_error=row.last_error,
+        created_at=row.created_at,
     )
 
 
@@ -698,7 +714,7 @@ def _persona_row_to_model(
     return S.PersonaEntity(
         id=row.id,
         name=row.name,
-        image_url=row.image_url,
+        image_url=_local_blob_to_base64_url(row.image_url),
         gender=row.gender,
         status=row.status,
         progress=row.progress,
@@ -708,11 +724,12 @@ def _persona_row_to_model(
         voice_id=row.voice_id,
         voice_source=row.voice_source,
         voice_description=row.voice_description,
-        voice_sample_url=row.voice_sample_url,
-        voice_preview_url=row.voice_preview_url,
+        voice_sample_url=_local_blob_to_base64_url(row.voice_sample_url),
+        voice_preview_url=_local_blob_to_base64_url(row.voice_preview_url),
         voice_status=row.voice_status,
         voice_last_error=row.voice_last_error,
         avatars=avatars,
+        created_at=row.created_at,
     )
 
 
@@ -724,8 +741,8 @@ def _voice_row_to_model(row: VoiceRow) -> S.VoiceEntity:
         voice_id=row.voice_id,
         source=row.source,
         description=row.description,
-        sample_url=row.sample_url,
-        preview_url=row.preview_url,
+        sample_url=_local_blob_to_base64_url(row.sample_url),
+        preview_url=_local_blob_to_base64_url(row.preview_url),
         persona_id=row.persona_id,
         status=row.status,
         last_error=row.last_error,
@@ -753,6 +770,7 @@ def _assistant_row_to_model(row: AssistantRow) -> S.Assistant:
         progress=row.progress,
         stage=row.stage,
         last_error=row.last_error,
+        created_at=row.created_at,
     )
 
 
@@ -827,26 +845,6 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/local-blob/{key:path}")
-def serve_local_blob(key: str) -> Response:
-    """Serve a file written by the local-fallback :class:`LocalBlobStore`.
-
-    Used by the demo UI to render persona / avatar / voice media when
-    running under ``tenant_id=local_tenant``. Production tenants use
-    Azure Blob URLs that bypass this route entirely. The route is not
-    tenant-scoped because the local fallback only supports the
-    ``LOCAL_TENANT_ID`` sentinel — the file path is
-    ``LOCAL_DATA_DIR/<LOCAL_TENANT_ID>/blob/{key}``.
-    """
-    from app.local_storage import LocalBlobStore
-    store = LocalBlobStore(tenant_id=settings.local_tenant_id)
-    try:
-        data, content_type = store.read_local(key)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Blob not found")
-    return Response(content=data, media_type=content_type)
-
-
 @app.get("/config")
 def get_config() -> dict[str, object]:
     return {
@@ -864,20 +862,16 @@ def get_config() -> dict[str, object]:
     }
 
 
-@app.get("/presets")
-def get_studio_presets() -> dict[str, list[S.Preset]]:
-    """Curated avatar + voice preset library — a shared static catalogue
-    that doesn't depend on any tenant. Subcategory doubles as the UI
-    chip label; ``prompt`` is the full instruction appended to the
-    model brief."""
-    return {
-        "avatar_presets": [
-            S.Preset(id=pid, **meta) for pid, meta in AVATAR_PRESETS.items()
-        ],
-        "voice_presets": [
-            S.Preset(id=pid, **meta) for pid, meta in VOICE_PRESETS.items()
-        ],
-    }
+@app.get("/presets/avatar", response_model=list[S.Preset])
+def get_avatar_presets() -> list[S.Preset]:
+    """Curated avatar presets library."""
+    return [S.Preset(id=pid, **meta) for pid, meta in AVATAR_PRESETS.items()]
+
+
+@app.get("/presets/voice", response_model=list[S.Preset])
+def get_voice_presets() -> list[S.Preset]:
+    """Curated voice presets library."""
+    return [S.Preset(id=pid, **meta) for pid, meta in VOICE_PRESETS.items()]
 
 
 # ── Avatar status refresh (Simli polling) ─────────────────────────────────────
@@ -906,6 +900,7 @@ async def _refresh_avatar_status(ctx: TenantContext, avatar: AvatarRow) -> Avata
         avatar.status = "ready"
         avatar.face_id = ready_face_id
         avatar.last_error = None
+        await repo.update_assistants_face_id(ctx.session, avatar.id, ready_face_id)
     await ctx.session.flush()
     return avatar
 
@@ -931,35 +926,48 @@ async def _poll_avatar_until_ready(tenant_id: str, avatar_id: int) -> None:
 
 # ── Personas ──────────────────────────────────────────────────────────────────
 
-@app.get("/{tenant_id}/personas", response_model=list[S.PersonaEntity])
+@app.get("/{tenant_id}/personas", response_model=list[S.PersonaListEntity])
 async def list_personas(
     ctx: TenantContext = Depends(tenant_ctx),
     gender: str | None = Query(default=None),
     status: str | None = Query(default=None),
     voice_status: str | None = Query(default=None),
     voice_provider: str | None = Query(default=None),
+    voice_ref_id: int | None = Query(default=None),
+    has_avatars: bool | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-) -> list[S.PersonaEntity]:
+) -> list[S.PersonaListEntity]:
     personas = await repo.list_persona_entities(
         ctx.session,
         gender=gender,
         status=status,
         voice_status=voice_status,
         voice_provider=voice_provider,
+        voice_ref_id=voice_ref_id,
         limit=limit,
         offset=offset,
     )
-    persona_ids = {p.id for p in personas}
-    avatars = await repo.list_persona_avatars(ctx.session, persona_id=None)
-    for av in avatars:
-        if av.status == "processing":
-            await _refresh_avatar_status(ctx, av)
-    by_persona: dict[int, list[S.PersonaAvatar]] = {}
-    for av in avatars:
-        if av.persona_id in persona_ids:
-            by_persona.setdefault(av.persona_id, []).append(_avatar_row_to_model(av))
-    return [_persona_row_to_model(p, by_persona.get(p.id, [])) for p in personas]
+    res = []
+    for p in personas:
+        cnt = await repo.count_avatars_for_persona(ctx.session, p.id)
+        if has_avatars is not None:
+            if has_avatars and cnt == 0:
+                continue
+            if not has_avatars and cnt > 0:
+                continue
+        res.append(
+            S.PersonaListEntity(
+                id=p.id,
+                name=p.name,
+                image_url=_local_blob_to_base64_url(p.image_url),
+                created_at=p.created_at,
+                status=p.status,
+                gender=p.gender or "unknown",
+                avatar_count=cnt,
+            )
+        )
+    return res
 
 
 @app.get("/{tenant_id}/personas/{persona_id}", response_model=S.PersonaEntity)
@@ -1092,15 +1100,10 @@ async def persona_cascade_count(
     }
 
 
-class PersonaPatchRequest(BaseModel):
-    name: str | None = None
-    voice_ref_id: int | None = Field(default=None)
-
-
 @app.patch("/{tenant_id}/personas/{persona_id}", response_model=S.PersonaEntity)
 async def patch_persona(
     persona_id: int,
-    payload: PersonaPatchRequest,
+    payload: S.PersonaPatchRequest,
     ctx: TenantContext = Depends(tenant_ctx),
 ) -> S.PersonaEntity:
     persona = await repo.get_persona_entity(ctx.session, persona_id)
@@ -1184,48 +1187,7 @@ async def delete_persona(
     return {"deleted": deleted}
 
 
-@app.post("/{tenant_id}/personas/{persona_id}/cancel")
-async def cancel_persona(
-    persona_id: int,
-    ctx: TenantContext = Depends(tenant_ctx),
-) -> dict[str, str]:
-    persona = await repo.get_persona_entity(ctx.session, persona_id)
-    if persona is None:
-        raise HTTPException(status_code=404, detail="Persona not found")
-    await repo.update_persona_entity(
-        ctx.session, persona_id, status="cancelled", stage="cancelled"
-    )
-    return {"status": "cancelled"}
-
-
 # ── Persona voice (design / clone / clear) ────────────────────────────────────
-
-async def _clear_persona_voice_columns(
-    ctx: TenantContext, persona_id: int
-) -> None:
-    """Zero out every voice-related column on a persona row.
-
-    Touches the persona row only — never the ElevenLabs voice, never the
-    sample/preview blobs. The voice resources (EL voice, blob audio) are
-    independent assets once created and are only destroyed by an explicit
-    ``DELETE /voices/{id}``. Used by:
-
-        * ``DELETE /personas/{id}/voice`` (unlink)
-        * ``/voice/design`` / ``/voice/clone`` (reset columns before
-          assigning the new voice — old voice assets stay alive)
-    """
-    await repo.update_persona_entity(
-        ctx.session,
-        persona_id,
-        voice_provider="",
-        voice_id="",
-        voice_source="",
-        voice_description="",
-        voice_sample_url="",
-        voice_preview_url="",
-        voice_status="",
-        voice_last_error=None,
-    )
 
 
 async def _store_voice_preview(
@@ -1254,294 +1216,22 @@ async def _store_voice_preview(
     return mp3 or None
 
 
-@app.post(
-    "/{tenant_id}/personas/{persona_id}/voice/design",
-    response_model=S.PersonaEntity,
-)
-async def design_persona_voice(
-    persona_id: int,
-    payload: S.PersonaVoiceDesignRequest,
-    ctx: TenantContext = Depends(tenant_ctx),
-) -> S.PersonaEntity:
-    requested_gender = _normalize_gender(payload.gender) if payload.gender else ""
-    if payload.gender and requested_gender not in {"male", "female"}:
-        raise HTTPException(
-            status_code=400,
-            detail="gender must be 'male' or 'female' when supplied",
-        )
 
-    persona = await repo.get_persona_entity(ctx.session, persona_id)
-    if persona is None:
-        raise HTTPException(status_code=404, detail="Persona not found")
-    snapshot = _persona_row_to_model(persona, []).model_copy(
-        update=dict(
-            voice_status="processing",
-            voice_source="designed",
-            voice_last_error=None,
-        )
-    )
-
-    asyncio.create_task(
-        _run_persona_voice_design(
-            ctx.tenant_id,
-            persona_id,
-            user_prompt=payload.user_prompt or "",
-            voice_name=payload.name or "",
-            gender_override=requested_gender,
-        )
-    )
-    return snapshot
-
-
-async def _run_persona_voice_design(
-    tenant_id: str,
-    persona_id: int,
-    *,
-    user_prompt: str,
-    voice_name: str,
-    gender_override: str = "",
-) -> None:
-    async with open_background_context(tenant_id) as ctx:
-        await _clear_persona_voice_columns(ctx, persona_id)
-        await repo.update_persona_entity(
-            ctx.session,
-            persona_id,
-            voice_status="processing",
-            voice_source="designed",
-            voice_last_error=None,
-        )
-        persona = await repo.get_persona_entity(ctx.session, persona_id)
-        if persona is None:
-            return
-        image_url = persona.image_url
-        persona_gender = persona.gender or "unknown"
-
-    # Persona-bound flow: persona's detected gender is the authoritative
-    # source. Override only applies when persona.gender is still 'unknown'.
-    if persona_gender in {"male", "female"}:
-        effective_gender = persona_gender
-    else:
-        effective_gender = gender_override or "unknown"
-
-    try:
-        image_bytes = await _fetch_url_bytes(image_url)
-        description = (
-            await ai_router.describe_voice(image_bytes, user_prompt=user_prompt) or ""
-        ).strip()
-        if len(description) < 20:
-            raise RuntimeError(
-                "Voice description was too short — model returned little or nothing."
-            )
-        if not settings.elevenlabs_api_key:
-            raise RuntimeError("ELEVENLABS_API_KEY is missing — cannot create voice.")
-
-        prompt_description = description + _gender_prompt_suffix(effective_gender)
-        # Tailored showcase line — one short sentence the model writes from
-        # the voice description. Falls back to a generic line on failure.
-        preview_text = await ai_router.generate_voice_preview_text(prompt_description)
-        previews = await elevenlabs_client.create_voice_design_previews(
-            settings.elevenlabs_api_key,
-            voice_description=prompt_description,
-            text=preview_text,
-        )
-        first = previews[0]
-        generated_voice_id = str(first.get("generated_voice_id") or "")
-        if not generated_voice_id:
-            raise RuntimeError(f"Preview had no generated_voice_id: {first}")
-        preview_bytes = elevenlabs_client.decode_preview_audio(first)
-
-        voice_id = await elevenlabs_client.create_voice_from_preview(
-            settings.elevenlabs_api_key,
-            name=voice_name or f"persona-{persona_id}-voice",
-            description=description[:500],
-            generated_voice_id=generated_voice_id,
-            labels=_labels_for_gender(effective_gender),
-        )
-
-        async with open_background_context(tenant_id) as ctx:
-            preview_url = ""
-            if preview_bytes:
-                preview_url = await _upload_audio(
-                    ctx, f"personas/{persona_id}/voice-preview", preview_bytes
-                )
-            await repo.update_persona_entity(
-                ctx.session,
-                persona_id,
-                voice_provider="elevenlabs",
-                voice_id=voice_id,
-                voice_source="designed",
-                voice_description=description,
-                voice_preview_url=preview_url,
-                voice_status="ready",
-                voice_last_error=None,
-            )
-    except Exception as exc:
-        async with open_background_context(tenant_id) as ctx:
-            await repo.update_persona_entity(
-                ctx.session,
-                persona_id,
-                voice_status="failed",
-                voice_last_error=str(exc),
-            )
-
-
-@app.post(
-    "/{tenant_id}/personas/{persona_id}/voice/clone",
-    response_model=S.PersonaEntity,
-)
-async def clone_persona_voice(
-    persona_id: int,
-    voice_sample: UploadFile = File(...),
-    name: str = Form(default=""),
-    tenant_id: str = PathParam(..., min_length=1, max_length=63),
-) -> S.PersonaEntity:
-    audio_bytes = await voice_sample.read()
-    if not audio_bytes:
-        raise HTTPException(status_code=400, detail="Voice sample is empty")
-    if len(audio_bytes) > 20 * 1024 * 1024:
-        raise HTTPException(
-            status_code=400, detail="Voice sample is too large (max 20 MB)"
-        )
-    mime = voice_sample.content_type or "audio/mpeg"
-    filename = voice_sample.filename or f"sample-{uuid4().hex}.mp3"
-
-    async with open_background_context(tenant_id) as ctx:
-        persona = await repo.get_persona_entity(ctx.session, persona_id)
-        if persona is None:
-            raise HTTPException(status_code=404, detail="Persona not found")
-        await repo.update_persona_entity(
-            ctx.session,
-            persona_id,
-            voice_status="processing",
-            voice_source="cloned",
-            voice_last_error=None,
-        )
-        persona = await repo.get_persona_entity(ctx.session, persona_id)
-        assert persona is not None
-        snapshot = _persona_row_to_model(persona, [])
-
-    asyncio.create_task(
-        _run_persona_voice_clone(
-            tenant_id,
-            persona_id,
-            audio_bytes=audio_bytes,
-            sample_filename=filename,
-            sample_mime=mime,
-            voice_name=name,
-        )
-    )
-    return snapshot
-
-
-async def _run_persona_voice_clone(
-    tenant_id: str,
-    persona_id: int,
-    *,
-    audio_bytes: bytes,
-    sample_filename: str,
-    sample_mime: str,
-    voice_name: str,
-) -> None:
-    sample_ext = os.path.splitext(sample_filename)[1].lower() or ".mp3"
-    try:
-        if not settings.elevenlabs_api_key:
-            raise RuntimeError("ELEVENLABS_API_KEY is missing — cannot create voice.")
-
-        async with open_background_context(tenant_id) as ctx:
-            await _clear_persona_voice_columns(ctx, persona_id)
-            await repo.update_persona_entity(
-                ctx.session,
-                persona_id,
-                voice_status="processing",
-                voice_source="cloned",
-                voice_last_error=None,
-            )
-            persona = await repo.get_persona_entity(ctx.session, persona_id)
-            persona_gender = (persona.gender if persona else "") or "unknown"
-            sample_url = await _upload_audio(
-                ctx, f"personas/{persona_id}/voice-sample", audio_bytes, ext=sample_ext
-            )
-
-        voice_id = await elevenlabs_client.add_cloned_voice(
-            settings.elevenlabs_api_key,
-            name=voice_name or f"persona-{persona_id}-voice",
-            description=f"Cloned from uploaded sample for persona {persona_id}",
-            audio_bytes=audio_bytes,
-            filename=sample_filename,
-            mime_type=sample_mime,
-            labels=_labels_for_gender(persona_gender),
-        )
-        # Showcase line — clone doesn't have a structured description so we
-        # synthesise one from the persona's voice description if any, else
-        # fall back to a generic gendered hint.
-        clone_hint = (
-            (persona.voice_description if persona else "")
-            or f"a cloned {persona_gender or 'unknown'} voice"
-        )
-        preview_text = await ai_router.generate_voice_preview_text(clone_hint)
-        preview_bytes = await _store_voice_preview(
-            settings.elevenlabs_api_key, voice_id, text=preview_text
-        )
-
-        async with open_background_context(tenant_id) as ctx:
-            preview_url = ""
-            if preview_bytes:
-                preview_url = await _upload_audio(
-                    ctx, f"personas/{persona_id}/voice-preview", preview_bytes
-                )
-            await repo.update_persona_entity(
-                ctx.session,
-                persona_id,
-                voice_provider="elevenlabs",
-                voice_id=voice_id,
-                voice_source="cloned",
-                voice_description="",
-                voice_sample_url=sample_url,
-                voice_preview_url=preview_url,
-                voice_status="ready",
-                voice_last_error=None,
-            )
-    except Exception as exc:
-        async with open_background_context(tenant_id) as ctx:
-            await repo.update_persona_entity(
-                ctx.session,
-                persona_id,
-                voice_status="failed",
-                voice_last_error=str(exc),
-            )
-
-
-@app.delete("/{tenant_id}/personas/{persona_id}/voice", response_model=S.PersonaEntity)
-async def delete_persona_voice(
-    persona_id: int,
-    ctx: TenantContext = Depends(tenant_ctx),
-) -> S.PersonaEntity:
-    """Detach a voice from a persona. Pure unlink — clears the persona's
-    voice columns only. Does NOT delete the ElevenLabs voice or any
-    sample/preview blobs. Voice assets are independent and only removed
-    via ``DELETE /voices/{id}``.
-    """
-    persona = await repo.get_persona_entity(ctx.session, persona_id)
-    if persona is None:
-        raise HTTPException(status_code=404, detail="Persona not found")
-    await _clear_persona_voice_columns(ctx, persona_id)
-    refreshed = await repo.get_persona_entity(ctx.session, persona_id)
-    assert refreshed is not None
-    return _persona_row_to_model(refreshed, [])
 
 
 # ── Avatars ───────────────────────────────────────────────────────────────────
 
-@app.get("/{tenant_id}/avatars", response_model=list[S.PersonaAvatar])
+@app.get("/{tenant_id}/avatars", response_model=list[S.AvatarListEntity])
 async def list_avatars(
     ctx: TenantContext = Depends(tenant_ctx),
     persona_id: int | None = Query(default=None),
     gender: str | None = Query(default=None),
     voice_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    assistant_id: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-) -> list[S.PersonaAvatar]:
+) -> list[S.AvatarListEntity]:
     avatars = await repo.list_persona_avatars(
         ctx.session,
         persona_id=persona_id,
@@ -1554,20 +1244,65 @@ async def list_avatars(
     for av in avatars:
         if av.status == "processing":
             await _refresh_avatar_status(ctx, av)
-    return [_avatar_row_to_model(av) for av in avatars]
+    if assistant_id is not None:
+        asst = await repo.get_assistant(ctx.session, assistant_id)
+        if asst is not None:
+            avatars = [av for av in avatars if av.id == asst.avatar_id]
+        else:
+            avatars = []
+    return [
+        S.AvatarListEntity(
+            id=av.id,
+            name=av.name,
+            image_url=_local_blob_to_base64_url(av.image_url),
+            created_at=av.created_at,
+            status=av.status,
+        )
+        for av in avatars
+    ]
 
 
-@app.get("/{tenant_id}/avatars/{avatar_id}", response_model=S.PersonaAvatar)
+@app.get("/{tenant_id}/avatars/{avatar_id}", response_model=S.PersonaAvatarDetail)
 async def get_avatar(
     avatar_id: int,
     ctx: TenantContext = Depends(tenant_ctx),
-) -> S.PersonaAvatar:
+) -> S.PersonaAvatarDetail:
     row = await repo.get_persona_avatar(ctx.session, avatar_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Avatar not found")
     if row.status == "processing":
         row = await _refresh_avatar_status(ctx, row)
-    return _avatar_row_to_model(row)
+    
+    persona_model = None
+    if row.persona_id is not None:
+        persona = await repo.get_persona_entity(ctx.session, row.persona_id)
+        if persona is not None:
+            persona_model = S.PersonaListEntity(
+                id=persona.id,
+                name=persona.name,
+                image_url=_local_blob_to_base64_url(persona.image_url),
+                created_at=persona.created_at,
+                status=persona.status,
+                gender=persona.gender or "unknown",
+                avatar_count=await repo.count_avatars_for_persona(ctx.session, persona.id),
+            )
+            
+    return S.PersonaAvatarDetail(
+        id=row.id,
+        persona_id=row.persona_id,
+        name=row.name,
+        decoration=row.decoration,
+        theme_prompt=row.theme_prompt,
+        preset_ids=_parse_preset_ids(row.preset_ids),
+        face_id=row.face_id,
+        image_url=_local_blob_to_base64_url(row.image_url),
+        status=row.status,
+        progress=row.progress,
+        stage=row.stage,
+        last_error=row.last_error,
+        created_at=row.created_at,
+        persona=persona_model,
+    )
 
 
 @app.post("/{tenant_id}/avatars/preview")
@@ -1733,6 +1468,7 @@ async def save_avatar(
                 status=avatar_status,
                 last_error=None,
             )
+            await repo.update_assistants_face_id(ctx.session, draft_avatar_id, face_id)
         else:
             row = await repo.insert_persona_avatar(
                 ctx.session,
@@ -1808,18 +1544,7 @@ async def delete_avatar(
     return {"deleted": deleted}
 
 
-@app.post("/{tenant_id}/avatars/{avatar_id}/cancel")
-async def cancel_avatar(
-    avatar_id: int,
-    ctx: TenantContext = Depends(tenant_ctx),
-) -> dict[str, str]:
-    row = await repo.get_persona_avatar(ctx.session, avatar_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Avatar not found")
-    await repo.update_persona_avatar(
-        ctx.session, avatar_id, status="cancelled", stage="cancelled"
-    )
-    return {"status": "cancelled"}
+
 
 
 @app.post("/{tenant_id}/avatars/{avatar_id}/retry")
@@ -1872,7 +1597,7 @@ async def retry_avatar(
 
 # ── Assistants ────────────────────────────────────────────────────────────────
 
-@app.get("/{tenant_id}/assistants", response_model=list[S.Assistant])
+@app.get("/{tenant_id}/assistants", response_model=list[S.AssistantListEntity])
 async def list_assistants_endpoint(
     ctx: TenantContext = Depends(tenant_ctx),
     persona_id: int | None = Query(default=None),
@@ -1882,7 +1607,7 @@ async def list_assistants_endpoint(
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-) -> list[S.Assistant]:
+) -> list[S.AssistantListEntity]:
     rows = await repo.list_assistants(
         ctx.session,
         persona_id=persona_id,
@@ -1893,18 +1618,79 @@ async def list_assistants_endpoint(
         limit=limit,
         offset=offset,
     )
-    return [_assistant_row_to_model(a) for a in rows]
+    res = []
+    for a in rows:
+        avatar_image_url = ""
+        persona_name = ""
+        avatar_name = ""
+        if a.avatar_id is not None:
+            av = await repo.get_persona_avatar(ctx.session, a.avatar_id)
+            if av is not None:
+                avatar_image_url = _local_blob_to_base64_url(av.image_url)
+                avatar_name = av.name
+        if a.persona_id is not None:
+            p = await repo.get_persona_entity(ctx.session, a.persona_id)
+            if p is not None:
+                persona_name = p.name
+        res.append(
+            S.AssistantListEntity(
+                id=a.id,
+                name=a.name,
+                avatar_image_url=avatar_image_url,
+                created_at=a.created_at,
+                status=a.status,
+                persona_id=a.persona_id,
+                avatar_id=a.avatar_id,
+                persona_name=persona_name,
+                avatar_name=avatar_name,
+            )
+        )
+    return res
 
 
-@app.get("/{tenant_id}/assistants/{assistant_id}", response_model=S.Assistant)
+@app.get("/{tenant_id}/assistants/{assistant_id}", response_model=S.AssistantDetail)
 async def get_assistant_endpoint(
     assistant_id: int,
     ctx: TenantContext = Depends(tenant_ctx),
-) -> S.Assistant:
+) -> S.AssistantDetail:
     row = await repo.get_assistant(ctx.session, assistant_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Assistant not found")
-    return _assistant_row_to_model(row)
+    
+    avatar_model = None
+    if row.avatar_id is not None:
+        avatar = await repo.get_persona_avatar(ctx.session, row.avatar_id)
+        if avatar is not None:
+            avatar_model = S.AvatarListEntity(
+                id=avatar.id,
+                name=avatar.name,
+                image_url=_local_blob_to_base64_url(avatar.image_url),
+                created_at=avatar.created_at,
+                status=avatar.status,
+            )
+            
+    return S.AssistantDetail(
+        id=row.id,
+        name=row.name,
+        prompt=row.prompt,
+        first_message=row.first_message,
+        persona_id=row.persona_id,
+        avatar_id=row.avatar_id,
+        avatar=avatar_model,
+        face_id=row.face_id,
+        simli_agent_id=row.simli_agent_id,
+        voice_provider=row.voice_provider,
+        voice_id=row.voice_id,
+        voice_model=row.voice_model,
+        language=row.language,
+        llm_provider=row.llm_provider,
+        llm_model=row.llm_model,
+        status=row.status,
+        progress=row.progress,
+        stage=row.stage,
+        last_error=row.last_error,
+        created_at=row.created_at,
+    )
 
 
 @app.post(
@@ -1973,6 +1759,98 @@ async def create_assistant(
         progress=100,
     )
     return _assistant_row_to_model(row)
+
+
+@app.patch("/{tenant_id}/assistants/{assistant_id}", response_model=S.AssistantDetail)
+async def patch_assistant(
+    assistant_id: int,
+    payload: S.AssistantPatch,
+    ctx: TenantContext = Depends(tenant_ctx),
+) -> S.AssistantDetail:
+    assistant = await repo.get_assistant(ctx.session, assistant_id)
+    if assistant is None:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+
+    fields: dict[str, Any] = {}
+    if payload.name is not None:
+        fields["name"] = payload.name
+    if payload.prompt is not None:
+        fields["prompt"] = payload.prompt
+    if payload.first_message is not None:
+        fields["first_message"] = payload.first_message
+    if payload.llm_provider is not None:
+        fields["llm_provider"] = payload.llm_provider.lower()
+    if payload.llm_model is not None:
+        fields["llm_model"] = payload.llm_model
+
+    if payload.avatar_id is not None:
+        avatar = await repo.get_persona_avatar(ctx.session, payload.avatar_id)
+        if avatar is None:
+            raise HTTPException(status_code=404, detail="Avatar not found")
+        avatar = await _refresh_avatar_status(ctx, avatar)
+        if avatar.status != "ready":
+            raise HTTPException(
+                status_code=409, detail="Avatar is still processing"
+            )
+        fields["avatar_id"] = payload.avatar_id
+        fields["face_id"] = avatar.face_id
+        if avatar.persona_id is not None:
+            fields["persona_id"] = avatar.persona_id
+            persona = await repo.get_persona_entity(ctx.session, avatar.persona_id)
+            if persona is not None:
+                if persona.voice_id and persona.voice_provider:
+                    fields["voice_provider"] = persona.voice_provider
+                    fields["voice_id"] = persona.voice_id
+                    fields["voice_model"] = (
+                        settings.tts_model
+                        if persona.voice_provider == "elevenlabs"
+                        else settings.default_simli_voice_model
+                    )
+                else:
+                    fields["voice_provider"] = settings.default_simli_voice_provider
+                    fields["voice_id"] = settings.default_simli_voice_id or None
+                    fields["voice_model"] = settings.default_simli_voice_model
+
+    if fields:
+        await repo.update_assistant(ctx.session, assistant_id, **fields)
+
+    updated = await repo.get_assistant(ctx.session, assistant_id)
+    assert updated is not None
+
+    avatar_model = None
+    if updated.avatar_id is not None:
+        av = await repo.get_persona_avatar(ctx.session, updated.avatar_id)
+        if av is not None:
+            avatar_model = S.AvatarListEntity(
+                id=av.id,
+                name=av.name,
+                image_url=av.image_url,
+                created_at=av.created_at,
+                status=av.status,
+            )
+
+    return S.AssistantDetail(
+        id=updated.id,
+        name=updated.name,
+        prompt=updated.prompt,
+        first_message=updated.first_message,
+        persona_id=updated.persona_id,
+        avatar_id=updated.avatar_id,
+        avatar=avatar_model,
+        face_id=updated.face_id,
+        simli_agent_id=updated.simli_agent_id,
+        voice_provider=updated.voice_provider,
+        voice_id=updated.voice_id,
+        voice_model=updated.voice_model,
+        language=updated.language,
+        llm_provider=updated.llm_provider,
+        llm_model=updated.llm_model,
+        status=updated.status,
+        progress=updated.progress,
+        stage=updated.stage,
+        last_error=updated.last_error,
+        created_at=updated.created_at,
+    )
 
 
 @app.get(
@@ -2093,7 +1971,7 @@ async def start_call(
 
 # ── Standalone voices ─────────────────────────────────────────────────────────
 
-@app.get("/{tenant_id}/voices", response_model=list[S.VoiceEntity])
+@app.get("/{tenant_id}/voices", response_model=list[S.VoiceListEntity])
 async def list_voices_endpoint(
     ctx: TenantContext = Depends(tenant_ctx),
     gender: str | None = Query(default=None),
@@ -2103,7 +1981,7 @@ async def list_voices_endpoint(
     persona_id: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-) -> list[S.VoiceEntity]:
+) -> list[S.VoiceListEntity]:
     rows = await repo.list_voices(
         ctx.session,
         gender=gender,
@@ -2114,7 +1992,19 @@ async def list_voices_endpoint(
         limit=limit,
         offset=offset,
     )
-    return [_voice_row_to_model(v) for v in rows]
+    return [
+        S.VoiceListEntity(
+            id=v.id,
+            name=v.name,
+            created_at=v.created_at,
+            status=v.status,
+            source=v.source,
+            gender=v.gender,
+            description=v.description,
+            persona_id=v.persona_id,
+        )
+        for v in rows
+    ]
 
 
 # NOTE: ``GET /{tenant_id}/voices/{voice_id}`` is declared *after* the

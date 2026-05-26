@@ -229,6 +229,11 @@ async def _load_assistant_from_job(
                 persona = await repo.get_persona_entity(
                     tctx.session, assistant.persona_id
                 )
+            avatar = None
+            if assistant is not None and assistant.avatar_id:
+                avatar = await repo.get_persona_avatar(
+                    tctx.session, assistant.avatar_id
+                )
             asst_dict = (
                 {
                     "id": assistant.id,
@@ -236,7 +241,7 @@ async def _load_assistant_from_job(
                     "prompt": assistant.prompt,
                     "first_message": assistant.first_message,
                     "persona_id": assistant.persona_id,
-                    "face_id": assistant.face_id,
+                    "face_id": avatar.face_id if avatar is not None else assistant.face_id,
                     "voice_provider": assistant.voice_provider,
                     "voice_id": assistant.voice_id,
                     "llm_provider": assistant.llm_provider,

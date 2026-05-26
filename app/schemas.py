@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-
 from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -43,8 +41,6 @@ class PersonaAvatar(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    # ``persona_id`` is null when the owning persona has been deleted; the
-    # avatar row survives so any assistants still referencing it stay valid.
     persona_id: int | None = None
     name: str
     decoration: str = ""
@@ -56,6 +52,7 @@ class PersonaAvatar(BaseModel):
     progress: int = 0
     stage: str = "queued"
     last_error: str | None = None
+    created_at: datetime | None = None
 
 
 class PersonaEntity(BaseModel):
@@ -78,6 +75,7 @@ class PersonaEntity(BaseModel):
     voice_status: str = ""
     voice_last_error: str | None = None
     avatars: list[PersonaAvatar] = Field(default_factory=list)
+    created_at: datetime | None = None
 
 
 class VoiceEntity(BaseModel):
@@ -105,8 +103,6 @@ class Assistant(BaseModel):
     name: str
     prompt: str
     first_message: str
-    # ``persona_id`` / ``avatar_id`` go null when the linked persona / avatar
-    # is deleted. The assistant itself is preserved — only the link breaks.
     persona_id: int | None = None
     avatar_id: int | None = None
     face_id: str = ""
@@ -121,6 +117,7 @@ class Assistant(BaseModel):
     progress: int = 0
     stage: str = "queued"
     last_error: str | None = None
+    created_at: datetime | None = None
 
 
 class StudioState(BaseModel):
@@ -128,6 +125,103 @@ class StudioState(BaseModel):
     personas: list[PersonaEntity] = Field(default_factory=list)
     assistants: list[Assistant] = Field(default_factory=list)
     voices: list[VoiceEntity] = Field(default_factory=list)
+
+
+# ── Slim list entities (for side panels on page load) ──
+
+class PersonaListEntity(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    image_url: str = ""
+    created_at: datetime | None = None
+    status: str
+    gender: str = "unknown"
+    avatar_count: int = 0
+
+
+class AvatarListEntity(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    image_url: str = ""
+    created_at: datetime | None = None
+    status: str
+
+
+class VoiceListEntity(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    created_at: datetime | None = None
+    status: str
+    source: str = ""
+    gender: str = ""
+    description: str = ""
+    persona_id: int | None = None
+
+
+class AssistantListEntity(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    avatar_image_url: str = ""
+    created_at: datetime | None = None
+    status: str
+    persona_id: int | None = None
+    avatar_id: int | None = None
+    persona_name: str = ""
+    avatar_name: str = ""
+
+
+# ── Card / Detailed entities ──
+
+class PersonaAvatarDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    persona_id: int | None = None
+    name: str
+    decoration: str = ""
+    theme_prompt: str = ""
+    preset_ids: list[str] = Field(default_factory=list)
+    face_id: str = ""
+    image_url: str = ""
+    status: str
+    progress: int = 0
+    stage: str = "queued"
+    last_error: str | None = None
+    created_at: datetime | None = None
+    persona: PersonaListEntity | None = None
+
+
+class AssistantDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    prompt: str
+    first_message: str
+    persona_id: int | None = None
+    avatar_id: int | None = None
+    avatar: AvatarListEntity | None = None
+    face_id: str = ""
+    simli_agent_id: str = ""
+    voice_provider: str = ""
+    voice_id: str | None = None
+    voice_model: str = ""
+    language: str = "en"
+    llm_provider: str = ""
+    llm_model: str = ""
+    status: str
+    progress: int = 0
+    stage: str = "queued"
+    last_error: str | None = None
+    created_at: datetime | None = None
 
 
 # ── Per-resource status (polled while a background task runs) ──
@@ -142,9 +236,6 @@ class StatusResponse(BaseModel):
 
 
 # ── Request bodies ──
-#
-# Bodies carry business inputs only. ``tenant_id`` is always a query
-# parameter — it never appears in a request body.
 
 class PersonaVoiceDesignRequest(BaseModel):
     user_prompt: str = Field(default="", max_length=500)
@@ -161,7 +252,7 @@ class PersonaVoiceDesignRequest(BaseModel):
 
 class AvatarPreviewResponse(BaseModel):
     preview_url: str
-    preview_key: str  # blob key — the client passes this back in AvatarCreateRequest
+    preview_key: str
     applied_prompt: str
     preset_ids: list[str] = Field(default_factory=list)
 
@@ -178,6 +269,22 @@ class AssistantCreate(BaseModel):
 
 class AssistantCallCreate(BaseModel):
     assistant_id: int
+
+
+# ── Patch update payload requests ──
+
+class PersonaPatchRequest(BaseModel):
+    name: str | None = None
+    voice_ref_id: int | None = None
+
+
+class AssistantPatch(BaseModel):
+    name: str | None = None
+    prompt: str | None = None
+    first_message: str | None = None
+    avatar_id: int | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
 
 
 # ── /calls plug-and-play response ──

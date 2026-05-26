@@ -33,6 +33,7 @@ async def list_persona_entities(
     status: str | None = None,
     voice_status: str | None = None,
     voice_provider: str | None = None,
+    voice_ref_id: int | None = None,
     limit: int | None = None,
     offset: int | None = None,
 ) -> list[PersonaEntity]:
@@ -45,6 +46,8 @@ async def list_persona_entities(
         stmt = stmt.where(PersonaEntity.voice_status == voice_status)
     if voice_provider is not None:
         stmt = stmt.where(PersonaEntity.voice_provider == voice_provider)
+    if voice_ref_id is not None:
+        stmt = stmt.where(PersonaEntity.voice_ref_id == voice_ref_id)
     if offset is not None:
         stmt = stmt.offset(offset)
     if limit is not None:
@@ -294,6 +297,16 @@ async def clear_face_id_for_avatar(session: AsyncSession, avatar_id: int) -> Non
     await session.execute(
         update(Assistant).where(Assistant.avatar_id == avatar_id).values(face_id="")
     )
+
+
+async def update_assistants_face_id(session: AsyncSession, avatar_id: int, face_id: str) -> None:
+    """Propagate a new or updated face_id from an avatar to all referencing assistants."""
+    await session.execute(
+        update(Assistant)
+        .where(Assistant.avatar_id == avatar_id)
+        .values(face_id=face_id)
+    )
+
 
 
 # Clears every voice-related field on any persona that referenced the given

@@ -6,8 +6,34 @@ let PRESETS=[];
 let VOICE_PRESETS=[];
 
 /* ── State ── */
-let studio=[],assistants=[],voices=[];
+let studio=[],assistants=[],voices=[],selectedPersonaAvatars=[],allAvatars=[];
 let selectedPersonaId=null,selectedAvatarId=null,selectedAssistantId=null,selectedVoiceId=null;
+
+const ELEVENLABS_FALLBACK_VOICES = {
+  "21m00Tcm4TlvDq8ikWAM": { name: "Rachel", gender: "female", accent: "american", description: "pleasant" },
+  "AZnzlk1XydvUeBnOEeMs": { name: "Domi", gender: "female", accent: "american", description: "energetic" },
+  "EXAVITQu4vr4xnSDxMaL": { name: "Bella", gender: "female", accent: "american", description: "whispery" },
+  "ErXwobaYiN019PkySvjV": { name: "Antoni", gender: "male", accent: "american", description: "well-rounded" },
+  "MF3mGyEYCl7XYWbV9VbO": { name: "Ellie", gender: "female", accent: "american", description: "energetic" },
+  "TxGEqn7nUJQUTg2thAfZ": { name: "Josh", gender: "male", accent: "american", description: "deep" },
+  "VR6A1In7x5I7udNsUpwD": { name: "Arnold", gender: "male", accent: "american", description: "crisp" },
+  "pNInz6obpgq5paqqcf1X": { name: "Adam", gender: "male", accent: "american", description: "narration" },
+  "yoZ06a0Zgoj9msFdQA16": { name: "Nicole", gender: "female", accent: "american", description: "whispery" },
+  "GBv7mTt0atIp3Br8iCZE": { name: "Thomas", gender: "male", accent: "american", description: "calm" },
+  "IKne3meq5aSn9XLyUdCD": { name: "Charlie", gender: "male", accent: "american", description: "natural" },
+  "LcfcDJNbi31gfqcZImDW": { name: "Emily", gender: "female", accent: "american", description: "natural" },
+  "N2lVS1w4EtoT3nt4gGfm": { name: "Sarah", gender: "female", accent: "american", description: "natural" },
+  "ODq5zmih86xlqwwPnW9C": { name: "Sam", gender: "male", accent: "american", description: "narration" },
+  "SOYUIqn2A4g4H6NocmaO": { name: "Gigi", gender: "female", accent: "american", description: "warm" },
+  "TX329zTpHNGKVg7jgp4X": { name: "Giovanni", gender: "male", accent: "italian", description: "warm" },
+  "XB0fDUnXUeTFXle5ptj5": { name: "Alice", gender: "female", accent: "british", description: "calm" },
+  "XrExMAJgTE2LwoujhyS1": { name: "Bella", gender: "female", accent: "american", description: "narration" },
+  "bV515pTLwSj1ib34Qthg": { name: "Mimi", gender: "female", accent: "american", description: "natural" },
+  "jBpfuIE2acFn3zgnw97C": { name: "Michael", gender: "male", accent: "american", description: "natural" },
+  "jsCqWAZ5z14v41Ka51DO": { name: "Lily", gender: "female", accent: "american", description: "natural" },
+  "onwK4e9Gkvtpc3q34pAO": { name: "Daniel", gender: "male", accent: "british", description: "deep" },
+  "pMs279TpHNGKVg7jgp4X": { name: "Serena", gender: "female", accent: "american", description: "warm" }
+};
 // Voice design preset multi-select state — list of currently-selected
 // VOICE_PRESETS ids (at most one per partition; enforced in
 // renderPresetUI + revalidated server-side).
@@ -22,6 +48,12 @@ let naDroppedAvatarId=null;
 let vdCloneSampleFile=null;
 let libraryVoices=[];
 let _libExpanded=false;
+let appliedFilters = {
+  voices: { gender: "", source: "", persona: "" },
+  personas: { gender: "", status: "", voice: "", has_avatars: "" },
+  avatars: { status: "", persona: "", assistant: "" },
+  assistants: { status: "", avatar: "" }
+};
 
 /* ── Rate-limit + retry helpers ── */
 function isRateLimitError(e){const s=String(e||"").toLowerCase();return s.includes("rate limit")||s.includes("429")||s.includes("quota")||s.includes("too many requests");}
@@ -154,15 +186,381 @@ function stageLabel(status,stage){
 
 /* ── Data helpers ── */
 const getPersona=id=>studio.find(p=>p.id===(id??selectedPersonaId))||null;
-const getAvatar=id=>{const p=getPersona();return p?.avatars?.find(a=>a.id===(id??selectedAvatarId))||null;};
+const getAvatar=id=>{
+  const av = selectedPersonaAvatars.find(a=>a.id===(id??selectedAvatarId));
+  if(av) return av;
+  const p=getPersona();
+  return p?.avatars?.find(a=>a.id===(id??selectedAvatarId))||null;
+};
 const getAssistant=id=>assistants.find(a=>a.id===(id??selectedAssistantId))||null;
 const getVoice=id=>voices.find(v=>v.id===(id??selectedVoiceId))||null;
 
+async function fetchDetailedPersona(id) {
+  try {
+    const r = await fetch(`/${TENANT_ID}/personas/${id}`);
+    if (r.ok) {
+      const detailed = await r.json();
+      const idx = studio.findIndex(x => x.id === id);
+      if (idx !== -1) {
+        studio[idx] = detailed;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to fetch detailed persona:", err);
+  }
+}
+
+async function fetchDetailedAvatar(id) {
+  try {
+    const r = await fetch(`/${TENANT_ID}/avatars/${id}`);
+    if (r.ok) {
+      const detailed = await r.json();
+      const idx = selectedPersonaAvatars.findIndex(x => x.id === id);
+      if (idx !== -1) {
+        selectedPersonaAvatars[idx] = detailed;
+      } else {
+        selectedPersonaAvatars.push(detailed);
+      }
+      // Also update in parent persona if available
+      const p = getPersona(detailed.persona_id);
+      if (p && p.avatars) {
+        const aIdx = p.avatars.findIndex(x => x.id === id);
+        if (aIdx !== -1) {
+          p.avatars[aIdx] = detailed;
+        } else {
+          p.avatars.push(detailed);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Failed to fetch detailed avatar:", err);
+  }
+}
+
+async function loadAvatars() {
+  const status = appliedFilters.avatars.status;
+  const persona_id = appliedFilters.avatars.persona || selectedPersonaId || "";
+  const assistant_id = appliedFilters.avatars.assistant;
+  
+  let url = `/${TENANT_ID}/avatars?`;
+  if (persona_id) url += `persona_id=${persona_id}&`;
+  if (status) url += `status=${status}&`;
+  if (assistant_id) url += `assistant_id=${assistant_id}&`;
+  try {
+    const r = await fetch(url);
+    if (r.ok) {
+      selectedPersonaAvatars = await r.json();
+    }
+  } catch (err) {
+    console.error("Failed to load avatars:", err);
+  }
+}
+
+async function initVoiceView() {
+  let detailed = null;
+  
+  if (selectedVoiceId === "default") {
+    detailed = {
+      id: "default",
+      name: "Default Voice",
+      source: "system",
+      description: "Built-in ElevenLabs default text-to-speech voice",
+      provider: "ElevenLabs",
+      voice_id: "EXAVITQu4vr4xnSDxMaL",
+      created_at: null,
+      persona_id: null,
+      preview_url: "https://api.elevenlabs.io/v1/voices/EXAVITQu4vr4xnSDxMaL/previews"
+    };
+  } else {
+    // Check in custom voices
+    const v = voices.find(x => String(x.id) === String(selectedVoiceId));
+    if (v) {
+      detailed = v;
+      try {
+        const r = await fetch(`/${TENANT_ID}/voices/${v.id}`);
+        if (r.ok) {
+          detailed = await r.json();
+          const idx = voices.findIndex(x => x.id === v.id);
+          if (idx !== -1) voices[idx] = detailed;
+        }
+      } catch (e) {
+        console.error("Failed to fetch detailed voice details:", e);
+      }
+    } else {
+      // Check in library voices
+      const lv = libraryVoices.find(x => x.voice_id === selectedVoiceId);
+      if (lv) {
+        const gender = lv.labels?.gender || "";
+        const accent = lv.labels?.accent || "";
+        const tags = [gender, accent, lv.labels?.description].filter(Boolean).join(" · ");
+        detailed = {
+          id: lv.voice_id,
+          name: lv.name,
+          source: "library",
+          description: `Premade ElevenLabs voice (${tags})`,
+          provider: "ElevenLabs",
+          voice_id: lv.voice_id,
+          created_at: null,
+          persona_id: null,
+          preview_url: lv.preview_url || `https://api.elevenlabs.io/v1/voices/${lv.voice_id}/previews`
+        };
+      } else {
+        // Fallback for standard ElevenLabs voices
+        const fallback = ELEVENLABS_FALLBACK_VOICES[selectedVoiceId];
+        if (fallback) {
+          detailed = {
+            id: selectedVoiceId,
+            name: fallback.name,
+            source: "library",
+            description: `Premade ElevenLabs voice (${fallback.gender} · ${fallback.accent} · ${fallback.description})`,
+            provider: "ElevenLabs",
+            voice_id: selectedVoiceId,
+            created_at: null,
+            persona_id: null,
+            preview_url: `https://api.elevenlabs.io/v1/voices/${selectedVoiceId}/previews`
+          };
+        }
+      }
+    }
+  }
+
+  if (!detailed) { showView("welcome"); return; }
+  
+  $("vv-name").textContent = detailed.name;
+  const pill = detailed.source === "cloned" ? "cloned" : detailed.source === "system" ? "designed" : detailed.source === "library" ? "designed" : "designed";
+  const label = detailed.source === "cloned" ? "Cloned" : detailed.source === "system" ? "System" : detailed.source === "library" ? "Library" : "AI Designed";
+  $("vv-source-badge").textContent = label;
+  $("vv-source-badge").className = `voice-badge ${pill}`;
+  if (detailed.source === "system") {
+    $("vv-source-badge").style.cssText = "background:rgba(100,100,255,.15);color:#b0b8ff;border-color:rgba(100,100,255,.35)";
+  } else {
+    $("vv-source-badge").style.cssText = "";
+  }
+  $("vv-description").textContent = detailed.description || "No description provided.";
+  $("vv-provider").textContent = detailed.provider || "ElevenLabs";
+  $("vv-elevenlabs-id").textContent = detailed.voice_id || "None";
+  $("vv-created-at").textContent = detailed.created_at ? new Date(detailed.created_at).toLocaleString() : "System Preset";
+  
+  const pers = detailed.persona_id ? studio.find(p => p.id === detailed.persona_id) : null;
+  const persEl = $("vv-persona");
+  if (pers) {
+    persEl.innerHTML = `<a href="#" style="color:var(--primary); font-weight:600; text-decoration:none" id="vv-persona-link">${esc(pers.name)}</a>`;
+    $("vv-persona-link").onclick = e => {
+      e.preventDefault();
+      selectedPersonaId = pers.id;
+      fetchDetailedPersona(pers.id).then(loadAvatars).then(() => showView("persona"));
+    };
+  } else {
+    persEl.textContent = "Global preset (available to all)";
+  }
+  
+  $("vv-play-btn").onclick = () => {
+    if (detailed.id === "default") {
+      playDefaultVoicePreview();
+    } else {
+      playVoicePreview(detailed);
+    }
+  };
+  
+  const delBtn = $("vv-delete-btn");
+  if (delBtn) {
+    delBtn.hidden = (detailed.id === "default" || detailed.source === "library" || detailed.source === "system");
+    delBtn.onclick = () => {
+      openDeleteModal("voice", detailed.id, detailed.name);
+    };
+  }
+}
+
+function syncPopupInputs(popupId) {
+  if (popupId === "voices-filter-popup") {
+    const g = $("filter-voices-gender"), s = $("filter-voices-source"), p = $("filter-voices-persona");
+    if (g) g.value = appliedFilters.voices.gender;
+    if (s) s.value = appliedFilters.voices.source;
+    if (p) p.value = appliedFilters.voices.persona;
+  } else if (popupId === "personas-filter-popup") {
+    const g = $("filter-personas-gender"), s = $("filter-personas-status"), v = $("filter-personas-voice"), av = $("filter-personas-has-avatars");
+    if (g) g.value = appliedFilters.personas.gender;
+    if (s) s.value = appliedFilters.personas.status;
+    if (v) v.value = appliedFilters.personas.voice;
+    if (av) av.value = appliedFilters.personas.has_avatars;
+  } else if (popupId === "avatars-filter-popup") {
+    const s = $("filter-avatars-status"), p = $("filter-avatars-persona"), a = $("filter-avatars-assistant");
+    if (s) s.value = appliedFilters.avatars.status;
+    if (p) p.value = appliedFilters.avatars.persona;
+    if (a) a.value = appliedFilters.avatars.assistant;
+  } else if (popupId === "contacts-filter-popup") {
+    const s = $("filter-assistants-status"), av = $("filter-assistants-avatar");
+    if (s) s.value = appliedFilters.assistants.status;
+    if (av) av.value = appliedFilters.assistants.avatar;
+  }
+}
+
+function initFilters() {
+  // Toggle popups
+  document.querySelectorAll(".filter-toggle-btn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const popupId = btn.dataset.popup;
+      const popup = $(popupId);
+      if (popup) {
+        // Close all other popups first
+        document.querySelectorAll(".filter-popup").forEach(p => {
+          if (p.id !== popupId) p.hidden = true;
+        });
+        popup.hidden = !popup.hidden;
+        if (!popup.hidden) {
+          syncPopupInputs(popupId);
+        }
+      }
+    });
+  });
+
+  // Close popups on Close button
+  document.querySelectorAll(".filter-popup-close").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const popupId = btn.dataset.popup;
+      const popup = $(popupId);
+      if (popup) popup.hidden = true;
+    });
+  });
+
+  // Click outside popups closes them
+  document.addEventListener("click", (e) => {
+    const insidePopup = e.target.closest(".filter-popup");
+    const insideToggle = e.target.closest(".filter-toggle-btn");
+    if (!insidePopup && !insideToggle) {
+      document.querySelectorAll(".filter-popup").forEach(popup => {
+        popup.hidden = true;
+      });
+    }
+  });
+
+  // Voices Apply / Reset
+  const btnApplyVoices = $("btn-apply-voices");
+  if (btnApplyVoices) {
+    btnApplyVoices.addEventListener("click", () => {
+      appliedFilters.voices.gender = $("filter-voices-gender")?.value || "";
+      appliedFilters.voices.source = $("filter-voices-source")?.value || "";
+      appliedFilters.voices.persona = $("filter-voices-persona")?.value || "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+  const btnResetVoices = $("btn-reset-voices");
+  if (btnResetVoices) {
+    btnResetVoices.addEventListener("click", () => {
+      const g = $("filter-voices-gender"), s = $("filter-voices-source"), p = $("filter-voices-persona");
+      if (g) g.value = "";
+      if (s) s.value = "";
+      if (p) p.value = "";
+      appliedFilters.voices.gender = "";
+      appliedFilters.voices.source = "";
+      appliedFilters.voices.persona = "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+
+  // Personas Apply / Reset
+  const btnApplyPersonas = $("btn-apply-personas");
+  if (btnApplyPersonas) {
+    btnApplyPersonas.addEventListener("click", () => {
+      appliedFilters.personas.gender = $("filter-personas-gender")?.value || "";
+      appliedFilters.personas.status = $("filter-personas-status")?.value || "";
+      appliedFilters.personas.voice = $("filter-personas-voice")?.value || "";
+      appliedFilters.personas.has_avatars = $("filter-personas-has-avatars")?.value || "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+  const btnResetPersonas = $("btn-reset-personas");
+  if (btnResetPersonas) {
+    btnResetPersonas.addEventListener("click", () => {
+      const g = $("filter-personas-gender"), s = $("filter-personas-status"), v = $("filter-personas-voice"), av = $("filter-personas-has-avatars");
+      if (g) g.value = "";
+      if (s) s.value = "";
+      if (v) v.value = "";
+      if (av) av.value = "";
+      appliedFilters.personas.gender = "";
+      appliedFilters.personas.status = "";
+      appliedFilters.personas.voice = "";
+      appliedFilters.personas.has_avatars = "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+
+  // Avatars Apply / Reset
+  const btnApplyAvatars = $("btn-apply-avatars");
+  if (btnApplyAvatars) {
+    btnApplyAvatars.addEventListener("click", () => {
+      appliedFilters.avatars.status = $("filter-avatars-status")?.value || "";
+      appliedFilters.avatars.persona = $("filter-avatars-persona")?.value || "";
+      appliedFilters.avatars.assistant = $("filter-avatars-assistant")?.value || "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+  const btnResetAvatars = $("btn-reset-avatars");
+  if (btnResetAvatars) {
+    btnResetAvatars.addEventListener("click", () => {
+      const s = $("filter-avatars-status"), p = $("filter-avatars-persona"), a = $("filter-avatars-assistant");
+      if (s) s.value = "";
+      if (p) p.value = "";
+      if (a) a.value = "";
+      appliedFilters.avatars.status = "";
+      appliedFilters.avatars.persona = "";
+      appliedFilters.avatars.assistant = "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+
+  // Assistants Apply / Reset
+  const btnApplyAssistants = $("btn-apply-assistants");
+  if (btnApplyAssistants) {
+    btnApplyAssistants.addEventListener("click", () => {
+      appliedFilters.assistants.status = $("filter-assistants-status")?.value || "";
+      appliedFilters.assistants.avatar = $("filter-assistants-avatar")?.value || "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+  const btnResetAssistants = $("btn-reset-assistants");
+  if (btnResetAssistants) {
+    btnResetAssistants.addEventListener("click", () => {
+      const s = $("filter-assistants-status"), av = $("filter-assistants-avatar");
+      if (s) s.value = "";
+      if (av) av.value = "";
+      appliedFilters.assistants.status = "";
+      appliedFilters.assistants.avatar = "";
+      document.querySelectorAll(".filter-popup").forEach(p => p.hidden = true);
+      refreshAll().catch(()=>{});
+    });
+  }
+}
+
 /* ── Voice playback ── */
-function playVoicePreview(voice){
-  if(!voice?.preview_url){alert("No preview audio available for this voice yet.");return;}
+async function playVoicePreview(voice){
+  let detailedVoice = voice;
+  if (!voice.preview_url) {
+    try {
+      const r = await fetch(`/${TENANT_ID}/voices/${voice.id}`);
+      if (r.ok) {
+        detailedVoice = await r.json();
+        const idx = voices.findIndex(v => v.id === voice.id);
+        if (idx !== -1) {
+          voices[idx] = detailedVoice;
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch detailed voice:", err);
+    }
+  }
+  if(!detailedVoice?.preview_url){alert("No preview audio available for this voice yet.");return;}
   const el=$("voice-preview-audio");if(!el)return;
-  el.src=voice.preview_url;
+  el.src=detailedVoice.preview_url;
   el.play().catch(()=>{});
 }
 async function playDefaultVoicePreview(){
@@ -204,14 +602,20 @@ function renderLeftPersonas(){
       card.append(thumb,info,cancelBtn);
     }else{
       const g=p.gender==="female"?"female":p.gender==="male"?"male":"unknown";
-      const rc=(p.avatars||[]).filter(a=>a.status==="ready").length;
+      const rc=p.avatar_count||0;
       card.className="entity-card"+(p.id===selectedPersonaId?" active":"");
       card.innerHTML=`<div class="entity-thumb" style="background-image:url('${(p.image_url||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
         <div class="entity-info"><div class="entity-name">${esc(p.name)}</div>
         <div class="entity-meta"><span class="gender-dot ${g}"></span>${p.gender||"unknown"} · ${rc} avatar${rc!==1?"s":""}</div></div>`;
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("persona",p.id,p.name);};card.appendChild(del);
-      card.addEventListener("click",()=>{selectedPersonaId=p.id;selectedAvatarId=null;showView("persona");});
+      card.addEventListener("click",async()=>{
+        selectedPersonaId=p.id;
+        selectedAvatarId=null;
+        await fetchDetailedPersona(p.id);
+        await loadAvatars();
+        showView("persona");
+      });
       card.draggable=true;
       card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"persona",id:p.id,name:p.name,image_url:p.image_url}));e.dataTransfer.effectAllowed="copy";});
     }
@@ -224,7 +628,7 @@ function renderLeftAvatars(){
   list.innerHTML="";const persona=getPersona();
   if(!persona){if(hint)hint.hidden=false;if(badge)badge.textContent="0";return;}
   if(hint)hint.hidden=true;
-  const avatars=(persona.avatars||[]).filter(a=>a.status!=="cancelled");
+  const avatars=selectedPersonaAvatars.filter(a=>a.status!=="cancelled");
   if(badge)badge.textContent=avatars.filter(a=>a.status==="ready").length;
   if(!avatars.length){list.innerHTML='<p class="pane-hint">No avatars yet.</p>';return;}
   avatars.forEach(av=>{
@@ -239,7 +643,7 @@ function renderLeftAvatars(){
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("avatar",av.id,av.name);};
       card.append(thumb,info,del);
-      card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
+      card.addEventListener("click",async()=>{selectedAvatarId=av.id;await fetchDetailedAvatar(av.id);showView("avatar");});
     }else if(av.status==="not_saved"){
       card.className="entity-card entity-card--draft"+(av.id===selectedAvatarId?" active-purple":"");
       const thumb=document.createElement("div");thumb.className="entity-thumb sm";setThumb(thumb,av.image_url);
@@ -248,7 +652,7 @@ function renderLeftAvatars(){
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("avatar",av.id,av.name);};
       card.append(thumb,info,del);
-      card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
+      card.addEventListener("click",async()=>{selectedAvatarId=av.id;await fetchDetailedAvatar(av.id);showView("avatar");});
     }else if(av.status==="ready"){
       card.className="entity-card"+(av.id===selectedAvatarId?" active-purple":"");
       card.innerHTML=`<div class="entity-thumb sm" style="background-image:url('${(av.image_url||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
@@ -256,7 +660,7 @@ function renderLeftAvatars(){
         <div class="entity-meta">${esc(av.decoration||"No style")}</div></div>`;
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("avatar",av.id,av.name);};card.appendChild(del);
-      card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
+      card.addEventListener("click",async()=>{selectedAvatarId=av.id;await fetchDetailedAvatar(av.id);showView("avatar");});
       card.draggable=true;
       card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"avatar",id:av.id,name:av.name,image_url:av.image_url,persona_id:av.persona_id}));e.dataTransfer.effectAllowed="copy";});
     }else if(av.status==="processing"){
@@ -270,12 +674,12 @@ function renderLeftAvatars(){
       cancelBtn.onclick=e=>{e.stopPropagation();cancelBtn.disabled=true;
         fetch(`/${TENANT_ID}/avatars/${av.id}/cancel`,{method:"POST"}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
       card.append(thumb,info,cancelBtn);
-      card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
+      card.addEventListener("click",async()=>{selectedAvatarId=av.id;await fetchDetailedAvatar(av.id);showView("avatar");});
     }else if(av.status==="failed"){
       const rl=isRateLimitError(av.last_error);
       card.className="entity-card entity-card--draft"+(av.id===selectedAvatarId?" active-purple":"");
       card.style.pointerEvents="auto";card.style.cursor="pointer";
-      card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
+      card.addEventListener("click",async()=>{selectedAvatarId=av.id;await fetchDetailedAvatar(av.id);showView("avatar");});
       const thumb=document.createElement("div");thumb.className="entity-thumb sm";setThumb(thumb,av.image_url);
       const info=document.createElement("div");info.className="entity-info";
       info.innerHTML=`<div class="entity-name">${esc(av.name)}</div><div class="entity-stage err">✗ ${rl?"Rate limited":"Failed"}</div>`;
@@ -298,25 +702,56 @@ function renderLeftAvatars(){
 
 function renderLeftVoices(){
   const list=$("left-voice-list"),badge=$("voice-count-badge");
-  const ready=voices.filter(v=>v.status==="ready");
-  if(badge)badge.textContent=ready.length;
   list.innerHTML="";
-  // Permanent "Default Voice" card — always first, cannot be deleted
-  {
-    const dc=document.createElement("div");dc.className="voice-card";dc.style.cursor="pointer";
+
+  const sourceFilter = appliedFilters.voices.source;
+  const genderFilter = appliedFilters.voices.gender;
+  const personaFilter = appliedFilters.voices.persona;
+
+  // 1. Render Default Voice card if applicable:
+  const showDefault = (sourceFilter === "" || sourceFilter === "library") && 
+                      (genderFilter === "" || genderFilter === "female") && 
+                      (personaFilter === "");
+                                     
+  if (showDefault) {
+    const dc=document.createElement("div");dc.className="voice-card"+("default"===selectedVoiceId?" active":"");dc.style.cursor="pointer";
     const di=document.createElement("div");di.className="voice-thumb-icon";di.textContent="🔊";
     const info=document.createElement("div");info.className="voice-card-info";
     info.innerHTML='<div class="voice-card-name">Default Voice</div><div class="voice-card-meta"><span class="voice-source-pill designed" style="background:rgba(100,100,255,.15);color:#b0b8ff;border-color:rgba(100,100,255,.35)">System</span>Built-in ElevenLabs voice</div>';
     const play=document.createElement("button");play.className="voice-play-btn";play.textContent="▶";play.title="Play preview";
     play.onclick=e=>{e.stopPropagation();playDefaultVoicePreview();};
     dc.append(di,info,play);
-    dc.addEventListener("click",playDefaultVoicePreview);
+    dc.addEventListener("click",()=>{selectedVoiceId="default";showView("voice");});
     dc.draggable=true;
     dc.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"voice",id:0,name:"Default Voice",isDefault:true}));e.dataTransfer.effectAllowed="copy";});
     list.appendChild(dc);
   }
-  if(!voices.length)return;
-  voices.forEach(v=>{
+
+  // Filter custom database voices
+  const filteredVoices = voices.filter(v => {
+    // source filter: prompt/clone/library
+    if (sourceFilter === "prompt") {
+      if (v.source !== "designed" && v.source !== "prompt") return false;
+    } else if (sourceFilter === "clone") {
+      if (v.source !== "cloned" && v.source !== "clone") return false;
+    } else if (sourceFilter === "library") {
+      return false; // hide custom database voices when library is selected
+    }
+    
+    // gender filter
+    if (genderFilter) {
+      const vg = (v.gender || "").toLowerCase();
+      if (vg !== genderFilter.toLowerCase() && vg !== "unisex" && vg !== "unknown") return false;
+    }
+    
+    // persona filter
+    if (personaFilter && String(v.persona_id) !== String(personaFilter)) return false;
+    
+    return true;
+  });
+
+  // 2. Render Custom Voices (designed/cloned from backend):
+  filteredVoices.forEach(v=>{
     const card=document.createElement("div");
     if(v.status==="processing"){
       card.className="voice-card entity-card--inprog";
@@ -326,6 +761,7 @@ function renderLeftVoices(){
       info.innerHTML=`<div class="voice-card-name">${esc(v.name)}</div><div class="entity-stage">⚡ Designing…</div>`;
       const spin=document.createElement("div");spin.className="entity-spin";spin.style.cssText="position:static;margin-left:auto;flex-shrink:0";
       card.append(icon,info,spin);
+      list.appendChild(card);
     }else if(v.status==="failed"){
       card.className="voice-card";card.style.cursor="default";
       const icon=document.createElement("div");icon.className="voice-thumb-icon";icon.textContent="🎙";
@@ -339,8 +775,9 @@ function renderLeftVoices(){
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("voice",v.id,v.name);};
       card.append(icon,info,retry,del);
+      list.appendChild(card);
     }else{
-      card.className="voice-card"+(v.id===selectedVoiceId?" active":"");
+      card.className="voice-card"+(String(v.id)===String(selectedVoiceId)?" active":"");
       const pill=v.source==="cloned"?"cloned":"designed";
       const icon=document.createElement("div");icon.className="voice-thumb-icon";icon.textContent="🎙";
       const info=document.createElement("div");info.className="voice-card-info";
@@ -350,37 +787,55 @@ function renderLeftVoices(){
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("voice",v.id,v.name);};
       card.append(icon,info,play,del);
-      card.addEventListener("click",()=>playVoicePreview(v));
+      card.addEventListener("click",()=>{selectedVoiceId=v.id;showView("voice");});
       card.draggable=true;
       card.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"voice",id:v.id,name:v.name}));e.dataTransfer.effectAllowed="copy";});
+      list.appendChild(card);
     }
-    list.appendChild(card);
   });
 
-  // ── ElevenLabs Library subsection ──
-  if(libraryVoices.length){
-    const hdr=document.createElement("div");
-    hdr.style.cssText="display:flex;align-items:center;gap:6px;padding:8px 4px 4px;cursor:pointer;user-select:none;grid-column:1/-1";
-    hdr.innerHTML=`<span style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--muted);text-transform:uppercase">ElevenLabs Library</span><span style="font-size:10px;color:var(--muted)">(${libraryVoices.length})</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${_libExpanded?"▲":"▼"}</span>`;
-    hdr.addEventListener("click",()=>{_libExpanded=!_libExpanded;renderLeftVoices();});
-    list.appendChild(hdr);
-    if(_libExpanded){
-      libraryVoices.forEach(lv=>{
-        const lc=document.createElement("div");lc.className="voice-card";lc.style.cssText="margin-left:4px;opacity:.9";
-        const li=document.createElement("div");li.className="voice-thumb-icon";li.style.cssText="font-size:14px";li.textContent="🎙";
-        const linfo=document.createElement("div");linfo.className="voice-card-info";
-        const gender=lv.labels?.gender||"";const accent=lv.labels?.accent||"";
-        const meta=[gender,accent].filter(Boolean).join(" · ")||"ElevenLabs";
-        linfo.innerHTML=`<div class="voice-card-name">${esc(lv.name)}</div><div class="voice-card-meta"><span class="voice-source-pill designed" style="background:rgba(100,200,100,.1);color:#a0d8a0;border-color:rgba(100,200,100,.3)">Library</span>${esc(meta)}</div>`;
-        const lplay=document.createElement("button");lplay.className="voice-play-btn";lplay.textContent="▶";lplay.title="Play preview";
-        lplay.onclick=e=>{e.stopPropagation();const el=$("voice-preview-audio");if(el&&lv.preview_url){el.src=lv.preview_url;el.play().catch(()=>{});}};
-        lc.append(li,linfo,lplay);
-        lc.addEventListener("click",()=>{const el=$("voice-preview-audio");if(el&&lv.preview_url){el.src=lv.preview_url;el.play().catch(()=>{});}});
-        lc.draggable=true;
-        lc.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"library-voice",voice_id:lv.voice_id,name:lv.name,preview_url:lv.preview_url}));e.dataTransfer.effectAllowed="copy";});
-        list.appendChild(lc);
-      });
+  // 3. Render ElevenLabs Library subsection:
+  const showLibrary = (sourceFilter === "" || sourceFilter === "library");
+  let libraryCount = 0;
+  if(showLibrary && libraryVoices.length){
+    let filteredLib = libraryVoices;
+    if (genderFilter) {
+      filteredLib = libraryVoices.filter(lv => (lv.labels?.gender || "").toLowerCase() === genderFilter.toLowerCase());
     }
+    if (personaFilter) {
+      filteredLib = [];
+    }
+    libraryCount = filteredLib.length;
+    
+    if (filteredLib.length) {
+      const hdr=document.createElement("div");
+      hdr.style.cssText="display:flex;align-items:center;gap:6px;padding:8px 4px 4px;cursor:pointer;user-select:none;grid-column:1/-1";
+      hdr.innerHTML=`<span style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--muted);text-transform:uppercase">ElevenLabs Library</span><span style="font-size:10px;color:var(--muted)">(${filteredLib.length})</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${_libExpanded?"▲":"▼"}</span>`;
+      hdr.addEventListener("click",()=>{_libExpanded=!_libExpanded;renderLeftVoices();});
+      list.appendChild(hdr);
+      if(_libExpanded){
+        filteredLib.forEach(lv=>{
+          const lc=document.createElement("div");lc.className="voice-card"+(String(lv.voice_id)===String(selectedVoiceId)?" active":"");lc.style.cssText="margin-left:4px;opacity:.9";
+          const li=document.createElement("div");li.className="voice-thumb-icon";li.style.cssText="font-size:14px";li.textContent="🎙";
+          const linfo=document.createElement("div");linfo.className="voice-card-info";
+          const gender=lv.labels?.gender||"";const accent=lv.labels?.accent||"";
+          const meta=[gender,accent].filter(Boolean).join(" · ")||"ElevenLabs";
+          linfo.innerHTML=`<div class="voice-card-name">${esc(lv.name)}</div><div class="voice-card-meta"><span class="voice-source-pill designed" style="background:rgba(100,200,100,.1);color:#a0d8a0;border-color:rgba(100,200,100,.3)">Library</span>${esc(meta)}</div>`;
+          const lplay=document.createElement("button");lplay.className="voice-play-btn";lplay.textContent="▶";lplay.title="Play preview";
+          lplay.onclick=e=>{e.stopPropagation();const el=$("voice-preview-audio");if(el&&lv.preview_url){el.src=lv.preview_url;el.play().catch(()=>{});}};
+          lc.append(li,linfo,lplay);
+          lc.addEventListener("click",()=>{selectedVoiceId=lv.voice_id;showView("voice");});
+          lc.draggable=true;
+          lc.addEventListener("dragstart",e=>{e.dataTransfer.setData("text/plain",JSON.stringify({type:"library-voice",voice_id:lv.voice_id,name:lv.name,preview_url:lv.preview_url}));e.dataTransfer.effectAllowed="copy";});
+          list.appendChild(lc);
+        });
+      }
+    }
+  }
+
+  // Update badge count
+  if (badge) {
+    badge.textContent = filteredVoices.filter(v => v.status === "ready").length + (showDefault ? 1 : 0) + libraryCount;
   }
 }
 
@@ -390,29 +845,155 @@ function renderLeftContacts(){
   if(badge)badge.textContent=ready.length;list.innerHTML="";
   if(!ready.length){list.innerHTML='<p class="pane-hint">No assistants yet.</p>';return;}
   ready.forEach(asst=>{
-    const p=studio.find(x=>x.id===asst.persona_id),av=p?.avatars?.find(x=>x.id===asst.avatar_id);
     const item=document.createElement("div");
     item.className="contact-item"+(asst.id===selectedAssistantId?" active":"");
-    item.innerHTML=`<div class="contact-thumb-sm" style="background-image:url('${(av?.image_url||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
+    const imgUrl = asst.avatar_image_url || PLACEHOLDER;
+    const metaText = [asst.persona_name, asst.avatar_name].filter(Boolean).join(" › ") || "No avatar";
+    item.innerHTML=`<div class="contact-thumb-sm" style="background-image:url('${imgUrl.replace(/'/g,"\\'")}')"></div>
       <div><div class="contact-item-name">${esc(asst.name)}</div>
-      <div class="contact-item-meta">${esc(p?.name||"")} › ${esc(av?.name||"")}</div></div>
+      <div class="contact-item-meta">${esc(metaText)}</div></div>
       <div class="contact-call-dot"></div>`;
     const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
     del.onclick=e=>{e.stopPropagation();openDeleteModal("assistant",asst.id,asst.name);};item.appendChild(del);
-    item.addEventListener("click",()=>{selectedAssistantId=asst.id;showView("assistant");});
+    item.addEventListener("click",async()=>{
+      selectedAssistantId=asst.id;
+      // Fetch detailed assistant
+      try {
+        const r = await fetch(`/${TENANT_ID}/assistants/${asst.id}`);
+        if (r.ok) {
+          const detailed = await r.json();
+          const idx = assistants.findIndex(x => x.id === asst.id);
+          if (idx !== -1) {
+            assistants[idx] = detailed;
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch detailed assistant:", err);
+      }
+      showView("assistant");
+    });
     list.appendChild(item);
   });
 }
 
-function renderAll(){renderLeftPersonas();renderLeftAvatars();renderLeftVoices();renderLeftContacts();}
+function populateFilterDropdowns(){
+  const vp = $("filter-voices-persona");
+  if(vp){
+    const val = vp.value;
+    vp.innerHTML = '<option value="">All Personas</option>';
+    studio.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.name;
+      vp.appendChild(opt);
+    });
+    vp.value = val;
+  }
+
+  const pv = $("filter-personas-voice");
+  if(pv){
+    const val = pv.value;
+    pv.innerHTML = '<option value="">All Voices</option>';
+    voices.forEach(v => {
+      const opt = document.createElement("option");
+      opt.value = v.id;
+      opt.textContent = v.name;
+      pv.appendChild(opt);
+    });
+    pv.value = val;
+  }
+
+  const ap = $("filter-avatars-persona");
+  if(ap){
+    const val = ap.value;
+    ap.innerHTML = '<option value="">All Personas</option>';
+    studio.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.name;
+      ap.appendChild(opt);
+    });
+    ap.value = val;
+  }
+
+  const aa = $("filter-avatars-assistant");
+  if(aa){
+    const val = aa.value;
+    aa.innerHTML = '<option value="">All Assistants</option>';
+    assistants.forEach(a => {
+      const opt = document.createElement("option");
+      opt.value = a.id;
+      opt.textContent = a.name;
+      aa.appendChild(opt);
+    });
+    aa.value = val;
+  }
+
+  const asav = $("filter-assistants-avatar");
+  if(asav){
+    const val = asav.value;
+    asav.innerHTML = '<option value="">All Avatars</option>';
+    allAvatars.forEach(av => {
+      const opt = document.createElement("option");
+      opt.value = av.id;
+      opt.textContent = av.name;
+      asav.appendChild(opt);
+    });
+    asav.value = val;
+  }
+}
+
+function updateActiveFilterSummaries(){
+  // Voices summary
+  const vg = appliedFilters.voices.gender, vs = appliedFilters.voices.source, vp = appliedFilters.voices.persona;
+  const voiceFilters = [vg, vs ? (vs === "prompt" ? "designed" : vs === "clone" ? "cloned" : "library") : "", vp ? "persona" : ""].filter(Boolean);
+  const voiceSummary = $("voices-active-summary");
+  if (voiceSummary) {
+    voiceSummary.textContent = voiceFilters.length ? `(${voiceFilters.length} active)` : "";
+  }
+
+  // Personas summary
+  const pg = appliedFilters.personas.gender, ps = appliedFilters.personas.status, pv = appliedFilters.personas.voice, pa = appliedFilters.personas.has_avatars;
+  const personaFilters = [pg, ps, pv ? "voice" : "", pa ? (pa === "true" ? "has avatars" : "no avatars") : ""].filter(Boolean);
+  const personaSummary = $("personas-active-summary");
+  if (personaSummary) {
+    personaSummary.textContent = personaFilters.length ? `(${personaFilters.length} active)` : "";
+  }
+
+  // Avatars summary
+  const as = appliedFilters.avatars.status, ap = appliedFilters.avatars.persona, aa = appliedFilters.avatars.assistant;
+  const avatarFilters = [as, ap ? "persona" : "", aa ? "assistant" : ""].filter(Boolean);
+  const avatarSummary = $("avatars-active-summary");
+  if (avatarSummary) {
+    avatarSummary.textContent = avatarFilters.length ? `(${avatarFilters.length} active)` : "";
+  }
+
+  // Assistants summary
+  const ast = appliedFilters.assistants.status, av = appliedFilters.assistants.avatar;
+  const assistantFilters = [ast, av ? "avatar" : ""].filter(Boolean);
+  const assistantSummary = $("contacts-active-summary");
+  if (assistantSummary) {
+    assistantSummary.textContent = assistantFilters.length ? `(${assistantFilters.length} active)` : "";
+  }
+}
+
+function renderAll(){
+  updateActiveFilterSummaries();
+  populateFilterDropdowns();
+  renderLeftPersonas();
+  renderLeftAvatars();
+  renderLeftVoices();
+  renderLeftContacts();
+}
 
 /* ── Center views ── */
-const ALL_VIEWS=["cv-welcome","cv-new-persona","cv-persona","cv-avatar","cv-assistant","cv-voice-design","cv-new-avatar","cv-new-assistant"];
+const ALL_VIEWS=["cv-welcome","cv-new-persona","cv-persona","cv-avatar","cv-assistant","cv-voice-design","cv-new-avatar","cv-new-assistant","cv-voice"];
 function showView(view){
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=true;});
   const target=$("cv-"+view);if(target)target.hidden=false;
   if(view==="new-persona")initNewPersona();
   else if(view==="persona")initPersonaView();
+  else if(view==="voice")initVoiceView();
   else if(view==="avatar")initAvatarView();
   else if(view==="assistant")initAssistantView();
   else if(view==="voice-design")initVoiceDesignView();
@@ -577,9 +1158,11 @@ $("avv-save-avatar-btn").addEventListener("click",async()=>{
 /* ── Assistant view ── */
 function initAssistantView(){
   const asst=getAssistant();if(!asst){showView("welcome");return;}
-  const p=studio.find(x=>x.id===asst.persona_id),av=p?.avatars?.find(x=>x.id===asst.avatar_id);
-  setThumb($("ca-thumb"),av?.image_url);$("ca-name").textContent=asst.name;$("ca-sub").textContent=(p?.name||"")+" › "+(av?.name||"");
-  setThumb($("ca-call-thumb"),av?.image_url);$("ca-call-name").textContent=asst.name;
+  const p=studio.find(x=>x.id===asst.persona_id);
+  const avatarUrl = asst.avatar?.image_url || PLACEHOLDER;
+  const avatarName = asst.avatar?.name || "No avatar";
+  setThumb($("ca-thumb"),avatarUrl);$("ca-name").textContent=asst.name;$("ca-sub").textContent=(p?.name||"")+" › "+avatarName;
+  setThumb($("ca-call-thumb"),avatarUrl);$("ca-call-name").textContent=asst.name;
   setStatus($("ca-call-status"),"");
   const cn=$("clone-asst-name");if(cn)cn.value=asst.name+" Clone";
   const cp=$("clone-asst-prompt");if(cp)cp.value=asst.prompt||"";
@@ -1119,14 +1702,117 @@ function setCallMode(m){$("call-shell").hidden=m!=="fullscreen";$("floating-call
 function setCallWaiting(show,msg){const el=$("call-waiting");if(!el)return;el.hidden=!show;if(msg)el.textContent=msg;}
 
 function attachTrack(pub){
-  const track=pub.track;if(!track)return;
-  const vid=$("call-video");
-  // Route both audio and video through the same <video> element so the browser
-  // keeps them on the same media clock — the only way to guarantee AV sync.
-  if(track.kind==="video"){track.attach(vid);setCallWaiting(false);}
-  else if(track.kind==="audio"){track.attach(vid);}
+  const track = pub.track;
+  if (!track) return;
+  
+  const vid = $("call-video");
+  if (!vid) return;
+
+  if (track.kind === "video") {
+    setCallWaiting(false);
+  }
+
+  // Find all subscribed remote tracks in the room
+  let remoteVideoTrack = null;
+  let remoteAudioTrack = null;
+
+  if (lkRoom) {
+    lkRoom.remoteParticipants.forEach(p => {
+      p.trackPublications.forEach(publication => {
+        if (publication.isSubscribed && publication.track) {
+          if (publication.track.kind === "video") {
+            remoteVideoTrack = publication.track;
+          } else if (publication.track.kind === "audio") {
+            remoteAudioTrack = publication.track;
+          }
+        }
+      });
+    });
+  }
+
+  // Fallback to the current track if not found in participant loop
+  if (!remoteVideoTrack && track.kind === "video") remoteVideoTrack = track;
+  if (!remoteAudioTrack && track.kind === "audio") remoteAudioTrack = track;
+
+  // Combine tracks into a single MediaStream to guarantee absolute hardware-level synchronization
+  const tracksToCombine = [];
+  if (remoteVideoTrack && remoteVideoTrack.mediaStreamTrack) {
+    tracksToCombine.push(remoteVideoTrack.mediaStreamTrack);
+  }
+  if (remoteAudioTrack && remoteAudioTrack.mediaStreamTrack) {
+    tracksToCombine.push(remoteAudioTrack.mediaStreamTrack);
+  }
+
+  if (tracksToCombine.length > 0) {
+    // Check if the current srcObject is already a MediaStream containing these tracks
+    // to avoid unnecessary re-assignments that cause video flickering or audio pops.
+    const currentStream = vid.srcObject;
+    let needsUpdate = true;
+    
+    if (currentStream instanceof MediaStream) {
+      const currentTracks = currentStream.getTracks();
+      if (currentTracks.length === tracksToCombine.length) {
+        const matchesAll = currentTracks.every(t => tracksToCombine.includes(t));
+        if (matchesAll) {
+          needsUpdate = false;
+        }
+      }
+    }
+
+    if (needsUpdate) {
+      vid.srcObject = new MediaStream(tracksToCombine);
+      vid.play().catch(err => console.log("Video play failed:", err));
+    }
+  }
 }
-function detachTrack(pub){const t=pub.track;if(t)t.detach().forEach(el=>el.remove?.());}
+
+function detachTrack(pub){
+  const track = pub.track;
+  if (!track) return;
+  
+  const vid = $("call-video");
+  if (!vid) return;
+
+  // Detach using standard LiveKit routine
+  try {
+    track.detach(vid);
+  } catch (e) {
+    console.warn("Track detach failed:", e);
+  }
+
+  // Re-combine any remaining remote tracks in the room
+  let remainingVideo = null;
+  let remainingAudio = null;
+
+  if (lkRoom) {
+    lkRoom.remoteParticipants.forEach(p => {
+      p.trackPublications.forEach(publication => {
+        if (publication.isSubscribed && publication.track && publication.track !== track) {
+          if (publication.track.kind === "video") {
+            remainingVideo = publication.track;
+          } else if (publication.track.kind === "audio") {
+            remainingAudio = publication.track;
+          }
+        }
+      });
+    });
+  }
+
+  const tracksToCombine = [];
+  if (remainingVideo && remainingVideo.mediaStreamTrack) {
+    tracksToCombine.push(remainingVideo.mediaStreamTrack);
+  }
+  if (remainingAudio && remainingAudio.mediaStreamTrack) {
+    tracksToCombine.push(remainingAudio.mediaStreamTrack);
+  }
+
+  if (tracksToCombine.length > 0) {
+    vid.srcObject = new MediaStream(tracksToCombine);
+    vid.play().catch(() => {});
+  } else {
+    vid.srcObject = null;
+  }
+}
 
 async function launchCall(){
   const asst=getAssistant();if(!asst)return;
@@ -1213,24 +1899,43 @@ async function loadPresets(){
 // GET /personas?tenant_id=… — filters and pagination would go on the URL too,
 // e.g. ?tenant_id=…&gender=female&limit=20&offset=0.
 async function loadStudio(){
-  const r=await fetch(`/${TENANT_ID}/personas`);
+  const gender = appliedFilters.personas.gender;
+  const status = appliedFilters.personas.status;
+  const voice_ref_id = appliedFilters.personas.voice;
+  const has_avatars = appliedFilters.personas.has_avatars;
+  let url = `/${TENANT_ID}/personas?`;
+  if(gender) url += `gender=${gender}&`;
+  if(status) url += `status=${status}&`;
+  if(voice_ref_id) url += `voice_ref_id=${voice_ref_id}&`;
+  if(has_avatars) url += `has_avatars=${has_avatars}&`;
+  const r=await fetch(url);
   studio=await r.json();
 }
 
-// GET /assistants?tenant_id=…
 async function loadAssistants(){
-  const r=await fetch(`/${TENANT_ID}/assistants`);
+  const status = appliedFilters.assistants.status;
+  const avatar_id = appliedFilters.assistants.avatar;
+  let url = `/${TENANT_ID}/assistants?`;
+  if(status) url += `status=${status}&`;
+  if(avatar_id) url += `avatar_id=${avatar_id}&`;
+  const r=await fetch(url);
   assistants=await r.json();
 }
 
-// GET /voices?tenant_id=… — filters (gender, source, provider, status,
-// persona_id) and pagination would also go on the URL.
 async function loadVoices(){
-  const r=await fetch(`/${TENANT_ID}/voices`);
+  const gender = appliedFilters.voices.gender;
+  const source = appliedFilters.voices.source;
+  const persona_id = appliedFilters.voices.persona;
+  let url = `/${TENANT_ID}/voices?`;
+  if(gender) url += `gender=${gender}&`;
+  if(source === "prompt") url += `source=designed&`;
+  else if(source === "clone") url += `source=cloned&`;
+  else if(source === "library") url += `source=library&`;
+  if(persona_id) url += `persona_id=${persona_id}&`;
+  const r=await fetch(url);
   voices=await r.json();
 }
 
-// GET /voices/library?tenant_id=… — ElevenLabs's premade catalogue.
 async function loadLibraryVoices(){
   if(libraryVoices.length)return;
   try{
@@ -1238,12 +1943,24 @@ async function loadLibraryVoices(){
     libraryVoices=await r.json();
   }catch{}
 }
+
+async function loadAllAvatars(){
+  try {
+    const r = await fetch(`/${TENANT_ID}/avatars`);
+    if (r.ok) {
+      allAvatars = await r.json();
+    }
+  } catch (err) {
+    console.error("Failed to load all avatars:", err);
+  }
+}
+
 async function refreshAll(){
-  await Promise.all([loadStudio(),loadAssistants(),loadVoices()]);
+  await Promise.all([loadStudio(),loadAssistants(),loadVoices(),loadAvatars(),loadAllAvatars()]);
   renderAll();
   // Re-init persona voice slot if persona edit is visible
   if(!$("cv-persona")?.hidden){const p=getPersona();if(p)setupPvVoiceDropSlot(p);}
-  const need=studio.some(p=>p.status&&p.status!=="ready")||studio.some(p=>(p.avatars||[]).some(a=>a.status==="processing"))||assistants.some(a=>a.status&&a.status!=="ready")||voices.some(v=>v.status==="processing");
+  const need=studio.some(p=>p.status&&p.status!=="ready")||selectedPersonaAvatars.some(a=>a.status==="processing"||a.status==="generating")||assistants.some(a=>a.status&&a.status!=="ready")||voices.some(v=>v.status==="processing");
   clearTimeout(studioTimer);if(need)studioTimer=setTimeout(()=>refreshAll().catch(()=>{}),6000);
 }
 
@@ -1278,9 +1995,10 @@ document.addEventListener("click", e => {
 /* ── Boot ── */
 window.addEventListener("DOMContentLoaded",async()=>{
   setCallMode("hidden");
+  initFilters();
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=(v!=="cv-welcome");});
   startPolling();
-  try{await Promise.all([loadPresets(),loadStudio(),loadAssistants(),loadVoices()]);}catch(e){console.error("Initial load error:",e);}
+  try{await Promise.all([loadPresets(),loadStudio(),loadAssistants(),loadVoices(),loadAllAvatars()]);}catch(e){console.error("Initial load error:",e);}
   renderAll();
   loadLibraryVoices().then(()=>renderLeftVoices()).catch(()=>{});
 });

@@ -133,7 +133,7 @@ the per-tenant Postgres DB when the tenant is provisioned.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | int PK | |
-| `name`, `description`, `source` | string | `source` ∈ `designed` / `cloned` / `from-library` |
+| `name`, `description`, `source` | string | `source` ∈ `designed` / `cloned` / `premade` |
 | `provider`, `voice_id` | string | upstream voice id (e.g. ElevenLabs id) |
 | `sample_url`, `preview_url` | text | blob URLs |
 | `persona_id` | int? | optional link back to the persona this voice was designed from |
@@ -200,8 +200,8 @@ All routes return JSON unless noted. List endpoints accept `limit`
 - **UI use**: create-persona form. After save, poll `GET /{tenant_id}/personas/{id}/status` until `status ∈ {ready, failed}`.
 
 #### `GET /{tenant_id}/personas`
-- **Query**: `gender`, `status`, `voice_status`, `voice_provider` (all optional); `limit`, `offset`
-- **Resp**: `PersonaEntity[]` (each row includes its `avatars`)
+- **Query**: `gender`, `status`, `voice_status`, `voice_provider`, `voice_ref_id`, `has_avatars` (all optional); `limit`, `offset`
+- **Resp**: `PersonaListEntity[]` (each row includes lightweight metadata and `avatar_count`)
 - **UI use**: left-pane "Personas" panel.
 
 #### `GET /{tenant_id}/personas/{id}`
@@ -256,8 +256,8 @@ All routes return JSON unless noted. List endpoints accept `limit`
 - **UI use**: "Save avatar" — locks the preview into a persistent avatar and starts the Simli face-upload background task.
 
 #### `GET /{tenant_id}/avatars`
-- **Query**: `persona_id`, `gender`, `voice_id`, `status` (optional); `limit`, `offset`
-- **Resp**: `PersonaAvatar[]`
+- **Query**: `persona_id`, `gender`, `voice_id`, `status`, `assistant_id` (all optional); `limit`, `offset`
+- **Resp**: `AvatarListEntity[]`
 - **UI use**: avatars panel on a persona card.
 
 #### `GET /{tenant_id}/avatars/{id}`
@@ -298,7 +298,7 @@ All routes return JSON unless noted. List endpoints accept `limit`
 
 #### `GET /{tenant_id}/voices`
 - **Query**: `gender`, `source`, `provider`, `status`, `persona_id` (optional); `limit`, `offset`
-- **Resp**: `VoiceEntity[]`
+- **Resp**: `VoiceListEntity[]`
 - **UI use**: "Voices" panel in the sidebar.
 
 #### `GET /{tenant_id}/voices/{id}`
@@ -344,7 +344,7 @@ All routes return JSON unless noted. List endpoints accept `limit`
 
 #### `GET /{tenant_id}/assistants`
 - **Query**: `persona_id`, `avatar_id`, `voice_id`, `llm_provider`, `status` (optional); `limit`, `offset`
-- **Resp**: `Assistant[]`
+- **Resp**: `AssistantListEntity[]`
 - **UI use**: assistants panel.
 
 #### `GET /{tenant_id}/assistants/{id}`
@@ -398,7 +398,7 @@ async function pollUntilDone(resource, id, tenantId) {
 
 ## Calling from a browser
 
-Minimal vanilla HTML that joins an assistant call using `livekit-client`:
+Minimal vanilla HTML that joins an assistant call using `livekit-client`, combining remote video and audio tracks into a unified `MediaStream` to guarantee frame-perfect lip-sync synchronization:
 
 ```html
 <!doctype html>
@@ -417,12 +417,56 @@ async function startCall(assistantId) {
 
   const { Room, RoomEvent } = window.LivekitClient;
   const room = new Room({ adaptiveStream: true });
-  room.on(RoomEvent.TrackSubscribed, (track) => {
-    if (track.kind === "video") track.attach(document.getElementById("v"));
-    else if (track.kind === "audio") track.attach();
+
+  const vidElement = document.getElementById("v");
+
+  function syncTracks() {
+    let videoTrack = null;
+    let audioTrack = null;
+
+    room.remoteParticipants.forEach(p => {
+      p.trackPublications.forEach(pub => {
+        if (pub.isSubscribed && pub.track) {
+          if (pub.track.kind === "video") videoTrack = pub.track;
+          else if (pub.track.kind === "audio") audioTrack = pub.track;
+        }
+      });
+    });
+
+    const tracks = [];
+    if (videoTrack?.mediaStreamTrack) tracks.push(videoTrack.mediaStreamTrack);
+    if (audioTrack?.mediaStreamTrack) tracks.push(audioTrack.mediaStreamTrack);
+
+    if (tracks.length > 0) {
+      const currentStream = vidElement.srcObject;
+      let needsUpdate = true;
+      if (currentStream instanceof MediaStream) {
+        const currentTracks = currentStream.getTracks();
+        if (currentTracks.length === tracks.length && currentTracks.every(t => tracks.includes(t))) {
+          needsUpdate = false;
+        }
+      }
+      if (needsUpdate) {
+        vidElement.srcObject = new MediaStream(tracks);
+        vidElement.play().catch(err => console.error("Play failed:", err));
+      }
+    }
+  }
+
+  room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+    if (participant.isLocal) return;
+    syncTracks();
   });
+
+  room.on(RoomEvent.TrackUnsubscribed, () => {
+    syncTracks();
+  });
+
   await room.connect(data.livekit.url, data.livekit.token);
   await room.localParticipant.setMicrophoneEnabled(true);
+
+  // Sync any tracks already subscribed during connection
+  syncTracks();
 }
 </script>
 ```
