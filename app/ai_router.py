@@ -1,34 +1,117 @@
 from __future__ import annotations
 
+from app.ai_types import PersonaAnalysis
 from app.config import settings
-from app import gemini_client, openai_client
+from app import azure_openai_client, gemini_client, openai_client
 
 
 class AIProviderError(RuntimeError):
     pass
 
 
-async def detect_gender(image_bytes: bytes, *, mime_type: str = "image/png") -> str:
+async def analyse_persona(
+    image_bytes: bytes, *, mime_type: str = "image/png"
+) -> PersonaAnalysis:
+    """Single vision call returning apparent gender + a voice-design brief.
+
+    Dispatches to the provider named by ``GENDER_PROVIDER``. Returns a
+    strictly-typed :class:`PersonaAnalysis` (gender is
+    ``Literal["male", "female"]``). On **any** failure — transport
+    error, missing credentials, structured-output violation — the
+    exception propagates so the caller (the persona create background
+    task) can flip the persona row to ``status="failed"``.
+    """
     provider = settings.gender_provider
     if provider == "gemini":
-        if not settings.gemini_api_key:
-            return "unknown"
-        return await gemini_client.detect_gender_from_image(
+        return await gemini_client.analyse_persona_from_image(
             settings.gemini_api_key,
             image_bytes,
             model=settings.gender_model_gemini,
             mime_type=mime_type,
         )
     if provider == "openai":
-        if not settings.openai_api_key:
-            return "unknown"
-        return await openai_client.detect_gender_from_image(
+        return await openai_client.analyse_persona_from_image(
             settings.openai_api_key,
             image_bytes,
             model=settings.gender_model_openai,
             mime_type=mime_type,
         )
+    if provider == "azure_openai":
+        return await azure_openai_client.analyse_persona_from_image(
+            settings.azure_openai_endpoint,
+            settings.azure_openai_api_key,
+            image_bytes,
+            deployment=settings.azure_openai_deployment,
+            api_version=settings.azure_openai_api_version,
+            mime_type=mime_type,
+        )
     raise AIProviderError(f"Unknown GENDER_PROVIDER: {provider}")
+
+
+async def generate_voice_preview_text(description: str) -> str:
+    """One short audition line a voice with the given description would
+    naturally say.
+
+    Used to populate the ``text`` field of ElevenLabs Voice Design and
+    TTS preview synthesis. Returns a single sentence (typically 5–15
+    words). Falls back to a generic line if the LLM is unavailable or
+    the description is empty.
+    """
+    fallback = "Hello — it's good to be here."
+    desc = (description or "").strip()
+    if not desc:
+        return fallback
+
+    system_msg = (
+        "You write a SINGLE SHORT showcase line that a voice actor would "
+        "use to audition for the voice described. The line MUST be one "
+        "natural sentence between 5 and 15 words. Tailor it to the "
+        "voice's character — a warm therapist would say something gentle, "
+        "an energetic coach something motivational, a deep narrator "
+        "something cinematic. Return ONLY the line, no quotes, no "
+        "preamble, no explanation."
+    )
+    user_msg = f"Voice description:\n{desc}\n\nWrite the showcase line:"
+
+    provider = settings.gender_provider
+    try:
+        if provider == "gemini":
+            text = await gemini_client.generate_short_text(
+                settings.gemini_api_key,
+                system_msg=system_msg,
+                user_msg=user_msg,
+                model=settings.gender_model_gemini,
+            )
+        elif provider == "openai":
+            text = await openai_client.generate_short_text(
+                settings.openai_api_key,
+                system_msg=system_msg,
+                user_msg=user_msg,
+                model=settings.gender_model_openai,
+            )
+        elif provider == "azure_openai":
+            text = await azure_openai_client.generate_short_text(
+                settings.azure_openai_endpoint,
+                settings.azure_openai_api_key,
+                system_msg=system_msg,
+                user_msg=user_msg,
+                deployment=settings.azure_openai_deployment,
+                api_version=settings.azure_openai_api_version,
+            )
+        else:
+            return fallback
+    except Exception:
+        return fallback
+
+    # The model occasionally wraps the line in quotes or adds a leading
+    # "Sure! Here's the line:" — strip both.
+    cleaned = text.strip().strip('"').strip("'").strip()
+    # If the model produced multiple lines, take the first non-empty one.
+    for line in cleaned.splitlines():
+        line = line.strip().strip('"').strip("'").strip()
+        if line:
+            return line
+    return fallback
 
 
 async def detect_gender_from_audio(
@@ -60,7 +143,13 @@ async def describe_voice(
     user_prompt: str = "",
     mime_type: str = "image/png",
 ) -> str:
-    """Produce a natural-language voice description from a portrait. Uses the gender-detection provider."""
+    """Standalone voice-design brief from a portrait + an optional user prompt.
+
+    Distinct from :func:`analyse_persona`: this is used by the persona-voice
+    design endpoint and ``/voices/suggest-description`` where the caller
+    supplies a specific style hint. The two-field combined analysis used at
+    persona creation lives in :func:`analyse_persona`.
+    """
     provider = settings.gender_provider
     if provider == "gemini":
         if not settings.gemini_api_key:
@@ -80,6 +169,18 @@ async def describe_voice(
             image_bytes,
             user_prompt=user_prompt,
             model=settings.gender_model_openai,
+            mime_type=mime_type,
+        )
+    if provider == "azure_openai":
+        if not (settings.azure_openai_endpoint and settings.azure_openai_api_key):
+            return ""
+        return await azure_openai_client.describe_voice_from_image(
+            settings.azure_openai_endpoint,
+            settings.azure_openai_api_key,
+            image_bytes,
+            user_prompt=user_prompt,
+            deployment=settings.azure_openai_deployment,
+            api_version=settings.azure_openai_api_version,
             mime_type=mime_type,
         )
     raise AIProviderError(f"Unknown provider for voice description: {provider}")
@@ -111,5 +212,17 @@ async def generate_avatar(
             prompt_chain=prompt_chain,
             filename=filename,
             model=settings.image_model_openai,
+        )
+    if provider == "azure_openai":
+        if not (settings.azure_image_endpoint and settings.azure_image_api_key):
+            return base_image_bytes
+        return await azure_openai_client.generate_avatar_variant(
+            settings.azure_image_endpoint,
+            settings.azure_image_api_key,
+            base_image_bytes,
+            prompt_chain=prompt_chain,
+            filename=filename,
+            deployment=settings.azure_image_deployment,
+            api_version=settings.azure_image_api_version,
         )
     raise AIProviderError(f"Unknown IMAGE_PROVIDER: {provider}")

@@ -1,8 +1,9 @@
 """Provision a new customer tenant.
 
 Writes the five per-tenant secrets to Azure Key Vault under the
-``{tenant_id}-*`` naming convention, runs Alembic migrations against the
-supplied Postgres database, and ensures the named blob container exists.
+``tenant-{tenant_id}-*`` naming convention, runs Alembic migrations
+against the supplied Postgres database, and ensures the named blob
+container exists.
 
 Idempotent: re-running with the same arguments simply overwrites the
 Key Vault values and is a no-op for migrations and the container.

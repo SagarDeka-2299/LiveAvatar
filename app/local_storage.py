@@ -62,8 +62,14 @@ class LocalBlobStore:
         return target
 
     def _url_for(self, key: str) -> str:
+        # Browser-loadable URL served by the ``GET /local-blob/{key:path}``
+        # route in ``app/main.py``. The route streams from
+        # ``LOCAL_DATA_DIR/local_tenant/blob/{key}`` (no tenant id in the
+        # path because local-fallback only ever uses one tenant). For
+        # real Azure tenants ``BlobStore._url_for`` is used instead and
+        # points directly at the storage account.
         base = settings.local_blob_base_url.rstrip("/")
-        return f"{base}/{self._tenant_id}/{key.lstrip('/')}"
+        return f"{base}/{key.lstrip('/')}"
 
     async def upload_bytes(
         self,

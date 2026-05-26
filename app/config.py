@@ -22,20 +22,22 @@ class Settings:
     deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
     elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
 
-    # ── Task 1: gender detection ──
+    # ── Task 1: gender detection (vision LLM) ──
     gender_provider: str = os.getenv("GENDER_PROVIDER", "gemini").lower()
     gender_model_gemini: str = os.getenv("GENDER_MODEL_GEMINI", "gemini-3-flash-preview")
     gender_model_openai: str = os.getenv("GENDER_MODEL_OPENAI", "gpt-5.4-nano")
+    gender_model_azure_openai: str = os.getenv("GENDER_MODEL_AZURE_OPENAI", "gpt-4o")
 
     # ── Task 2: avatar image edit ──
     image_provider: str = os.getenv("IMAGE_PROVIDER", "gemini").lower()
     image_model_gemini: str = os.getenv("IMAGE_MODEL_GEMINI", "gemini-3.1-flash-image-preview")
     image_model_openai: str = os.getenv("IMAGE_MODEL_OPENAI", "gpt-image-1.5")
 
-    # ── Task 3: in-call LLM ──
-    llm_provider: str = os.getenv("LLM_PROVIDER", "openai").lower()
-    llm_model_openai: str = os.getenv("LLM_MODEL_OPENAI", "gpt-5.4-mini")
-    llm_model_gemini: str = os.getenv("LLM_MODEL_GEMINI", "gemini-3-flash-preview")
+    # ── Task 3: in-call LLM (driven by the LiveKit agent worker) ──
+    call_llm_provider: str = os.getenv("CALL_LLM_PROVIDER", "openai").lower()
+    call_llm_model_openai: str = os.getenv("CALL_LLM_MODEL_OPENAI", "gpt-4o-mini")
+    call_llm_model_gemini: str = os.getenv("CALL_LLM_MODEL_GEMINI", "gemini-3-flash-preview")
+    call_llm_model_azure_openai: str = os.getenv("CALL_LLM_MODEL_AZURE_OPENAI", "gpt-4o")
 
     # ── Task 4: STT ──
     stt_provider: str = os.getenv("STT_PROVIDER", "deepgram").lower()
@@ -51,6 +53,23 @@ class Settings:
     default_simli_voice_provider: str = os.getenv("DEFAULT_SIMLI_VOICE_PROVIDER", "elevenlabs")
     default_simli_voice_model: str = os.getenv("DEFAULT_SIMLI_VOICE_MODEL", "eleven_flash_v2_5")
     default_simli_voice_id: str = os.getenv("DEFAULT_SIMLI_VOICE_ID", "")
+
+    # ── Azure OpenAI (used when *_PROVIDER=azure_openai) ──
+    # gpt-4o resource: chat + vision (gender detection, voice description,
+    # in-call LLM).
+    azure_openai_endpoint: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+    azure_openai_api_key: str = os.getenv("AZURE_OPENAI_API_KEY", "")
+    azure_openai_api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+    azure_openai_deployment: str = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+
+    # gpt-image-2 resource: image edits / generation (avatar styling).
+    azure_image_endpoint: str = os.getenv("AZURE_IMAGE_ENDPOINT", "")
+    azure_image_api_key: str = os.getenv("AZURE_IMAGE_API_KEY", "")
+    # ``gpt-image-2`` ``/images/edits`` is only available on
+    # ``2025-04-01-preview`` and later. Older versions (e.g.
+    # ``2024-02-01``) work for ``/images/generations`` but 404 on edits.
+    azure_image_api_version: str = os.getenv("AZURE_IMAGE_API_VERSION", "2025-04-01-preview")
+    azure_image_deployment: str = os.getenv("AZURE_IMAGE_DEPLOYMENT", "gpt-image-2")
 
     # ── Azure Key Vault (service principal that reads per-tenant secrets) ──
     azure_keyvault_url: str = os.getenv("AZURE_KEYVAULT_URL", "")
@@ -70,10 +89,11 @@ class Settings:
     # production tenancy gateway — only the implementations differ.
     local_tenant_id: str = os.getenv("LOCAL_TENANT_ID", "local_tenant")
     local_data_dir: str = os.getenv("LOCAL_DATA_DIR", "./local_data")
-    # Base URL the local blob store uses when stamping URLs into DB rows.
-    # Demo UI and any browser-side consumer reach the file through
-    # ``{LOCAL_BLOB_BASE_URL}/{tenant_id}/{key}`` — see the
-    # ``GET /local-blob/{tenant_id}/{key}`` route in app/main.py.
+    # URL prefix the LocalBlobStore stamps into DB rows when generating
+    # references. Served by ``GET /local-blob/{key:path}`` in
+    # ``app/main.py`` (defined for local-fallback testing only — there's
+    # no tenant identifier in the URL because local fallback only ever
+    # uses the ``local_tenant`` sentinel).
     local_blob_base_url: str = os.getenv(
         "LOCAL_BLOB_BASE_URL", "http://localhost:8000/local-blob"
     )

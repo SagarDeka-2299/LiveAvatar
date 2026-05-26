@@ -9,10 +9,6 @@ services:
     env_file:
       - .env
     environment:
-      # The local-fallback URL stamped into blob references must be
-      # reachable from the host browser. With the port mapping above the
-      # default is fine, but override here if you bind a different port.
-      - LOCAL_BLOB_BASE_URL=http://localhost:8000/local-blob
       - LOCAL_DATA_DIR=/app/local_data
     volumes:
       # Persist the local-tenant SQLite + blob files across container

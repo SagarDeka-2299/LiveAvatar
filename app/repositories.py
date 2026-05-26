@@ -261,9 +261,16 @@ async def get_voice(session: AsyncSession, voice_id: int) -> Voice | None:
 
 
 async def update_voice(
-    session: AsyncSession, voice_id: int, **fields: Any
+    session: AsyncSession, row_id: int, **fields: Any
 ) -> Voice | None:
-    row = await session.get(Voice, voice_id)
+    """Update one ``voices`` row by its primary-key ``row_id``.
+
+    The parameter is named ``row_id`` (not ``voice_id``) on purpose —
+    the ``voices`` table has its own ``voice_id`` column (the upstream
+    ElevenLabs / Simli voice identifier), so a caller updating that
+    column passes ``voice_id=<el_id>`` as a kwarg and we mustn't shadow
+    it on the positional argument."""
+    row = await session.get(Voice, row_id)
     if row is None:
         return None
     for key, value in fields.items():
@@ -353,3 +360,5 @@ async def delete_all_persona_avatars(session: AsyncSession) -> int:
 async def delete_all_persona_entities(session: AsyncSession) -> int:
     result = await session.execute(delete(PersonaEntity))
     return result.rowcount or 0
+
+

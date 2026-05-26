@@ -2,42 +2,40 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Tenant scoping ──
 #
-# Every API consumer must identify the tenant they are operating against by
-# passing ``tenant_id`` either as a JSON body field (POST / PATCH / DELETE
-# with a body), a multipart form field (file-upload routes), or a query
-# parameter (GET / DELETE without a body). Every request model below
-# inherits from ``TenantScoped``.
-
-class TenantScoped(BaseModel):
-    # The pattern allows underscores because the local-fallback sentinel
-    # ('local_tenant') contains one. Strict validation (no underscores
-    # for real tenants, since Key Vault secret names disallow them)
-    # happens server-side in ``app.keyvault.validate_tenant_id``.
-    tenant_id: str = Field(
-        min_length=1,
-        max_length=63,
-        pattern=r"^[a-zA-Z0-9_-]+$",
-        description=(
-            "Identifier of the customer tenant. Used to look up the tenant's "
-            "DB connection string and blob credentials from Azure Key Vault. "
-            "Required in every request body — never accepted in the URL."
-        ),
-    )
+# Every API consumer identifies the tenant they are operating against by
+# passing ``tenant_id`` as a **required query parameter** on every route.
+# It never appears in request bodies. The FastAPI dependency
+# ``app.tenancy.tenant_ctx_query`` validates the value and opens the
+# tenant-scoped session.
 
 
 # ── Domain entities (response side) ──
 
-class ThemePreset(BaseModel):
+class Preset(BaseModel):
+    """One entry from the in-code preset library.
+
+    Three-level taxonomy: ``category → partition → subcategory``.
+    A user can pick chips from multiple categories and from multiple
+    partitions within a category, but at most one chip per partition
+    (chips inside a partition are mutually exclusive).
+    ``gender`` is the persona-gender filter — ``"unisex"`` chips are
+    always shown; gendered chips only show when the persona's gender
+    matches. ``subcategory`` doubles as the UI chip label; ``prompt``
+    is the detailed paragraph appended to the model brief.
+    """
+
     id: str
-    label: str
     category: str
-    gender: str = "all"
-    description: str
+    partition: str
+    subcategory: str
+    gender: Literal["male", "female", "unisex"]
     prompt: str
 
 
@@ -126,23 +124,16 @@ class Assistant(BaseModel):
 
 
 class StudioState(BaseModel):
-    presets: list[ThemePreset] = Field(default_factory=list)
+    presets: list[Preset] = Field(default_factory=list)
     personas: list[PersonaEntity] = Field(default_factory=list)
     assistants: list[Assistant] = Field(default_factory=list)
     voices: list[VoiceEntity] = Field(default_factory=list)
 
 
-# ── Per-resource status (replaces the WS event stream) ──
+# ── Per-resource status (polled while a background task runs) ──
 
 class StatusResponse(BaseModel):
-    """Polled by clients while a background task is in flight.
-
-    Returned by:
-      GET /personas/{id}/status?tenant_id=...
-      GET /avatars/{id}/status?tenant_id=...
-      GET /voices/{id}/status?tenant_id=...
-      GET /assistants/{id}/status?tenant_id=...
-    """
+    """Returned by ``GET /{resource}/{id}/status?tenant_id=…``."""
 
     status: str
     stage: str | None = None
@@ -150,9 +141,12 @@ class StatusResponse(BaseModel):
     last_error: str | None = None
 
 
-# ── Request bodies (all tenant-scoped) ──
+# ── Request bodies ──
+#
+# Bodies carry business inputs only. ``tenant_id`` is always a query
+# parameter — it never appears in a request body.
 
-class PersonaVoiceDesignRequest(TenantScoped):
+class PersonaVoiceDesignRequest(BaseModel):
     user_prompt: str = Field(default="", max_length=500)
     name: str = Field(default="", max_length=100)
     gender: str | None = Field(
@@ -165,14 +159,6 @@ class PersonaVoiceDesignRequest(TenantScoped):
     )
 
 
-class AvatarPreviewRequest(TenantScoped):
-    persona_id: int
-    name: str = Field(min_length=1, max_length=100)
-    theme_prompt: str = Field(default="", max_length=1000)
-    preset_ids: list[str] = Field(default_factory=list)
-    skip_styling: bool = False
-
-
 class AvatarPreviewResponse(BaseModel):
     preview_url: str
     preview_key: str  # blob key — the client passes this back in AvatarCreateRequest
@@ -180,15 +166,7 @@ class AvatarPreviewResponse(BaseModel):
     preset_ids: list[str] = Field(default_factory=list)
 
 
-class AvatarCreateRequest(TenantScoped):
-    persona_id: int
-    name: str = Field(min_length=1, max_length=100)
-    theme_prompt: str = Field(default="", max_length=1000)
-    preset_ids: list[str] = Field(default_factory=list)
-    preview_key: str = Field(min_length=1)
-
-
-class AssistantCreate(TenantScoped):
+class AssistantCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     prompt: str = Field(min_length=1)
     first_message: str = Field(default="Hi, I am your avatar assistant. How can I help?")
@@ -198,16 +176,11 @@ class AssistantCreate(TenantScoped):
     llm_model: str | None = None
 
 
-class AssistantCallCreate(TenantScoped):
+class AssistantCallCreate(BaseModel):
     assistant_id: int
 
 
-# ── New plug-and-play call response ──
-#
-# A single shot. The client has everything it needs to render a synced
-# face+voice call without making any further API calls: LiveKit credentials
-# for the actual realtime connection, plus metadata about the assistant,
-# avatar (with image URL), and voice (with preview URL).
+# ── /calls plug-and-play response ──
 
 class CallLivekit(BaseModel):
     url: str
@@ -240,5 +213,3 @@ class AssistantCallResponse(BaseModel):
     assistant: CallAssistant
     avatar: CallAvatar
     voice: CallVoice
-
-

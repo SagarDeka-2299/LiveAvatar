@@ -56,6 +56,11 @@
     .entity-thumb,.cv-thumb,.avatar-preview-img{cursor:zoom-in}
 
     /* ── Voice preset chips ── */
+    .voice-preset-cat{flex-basis:100%;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);opacity:.7;margin-top:8px}
+    .voice-preset-cat:first-child{margin-top:0}
+    /* ── Partition header inside the chip grid ── */
+    .preset-partition{flex-basis:100%;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);opacity:.7;margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,255,255,.06)}
+    .preset-partition:first-child{margin-top:0;padding-top:0;border-top:none}
     .voice-preset-chip{padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:var(--dim);font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;user-select:none}
     .voice-preset-chip:hover{border-color:rgba(245,158,11,.5);color:var(--amber);background:rgba(245,158,11,.07)}
     .voice-preset-chip.selected{border-color:var(--secondary);background:rgba(168,85,247,.14);color:var(--secondary);box-shadow:0 0 8px rgba(168,85,247,.25)}
@@ -246,12 +251,12 @@
           </label>
         </div>
         <div id="av-style-block">
-          <div class="field"><label>Style Presets <span class="field-note">Select multiple</span></label>
+          <div class="field"><label for="av-theme-input">Custom Prompt <span class="field-note">Optional — overrides any preset on conflict</span></label>
+            <input id="av-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
+          <div class="field"><label>Style Presets <span class="field-note">Select from multiple partitions; only one per partition</span></label>
             <div id="pv-preset-cats" class="preset-categories"></div>
             <div id="pv-preset-chips" class="preset-chips"></div>
             <div id="av-prompt-preview" class="prompt-preview" hidden></div></div>
-          <div class="field"><label for="av-theme-input">Custom Prompt <span class="field-note">Optional</span></label>
-            <input id="av-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
         </div>
         <p id="av-status" class="status-msg"></p>
       </div>
@@ -303,11 +308,11 @@
       <div id="avv-clone" class="tab-pane cv-body" hidden>
         <div class="field"><label for="clone-av-name">New Name</label>
           <input id="clone-av-name" type="text" placeholder="e.g. Casual Sophie" maxlength="100"/></div>
-        <div class="field"><label>Presets <span class="field-note">Pre-filled</span></label>
+        <div class="field"><label for="clone-av-theme">Custom Prompt <span class="field-note">Optional — overrides any preset on conflict</span></label>
+          <input id="clone-av-theme" type="text" maxlength="300"/></div>
+        <div class="field"><label>Style Presets <span class="field-note">Select from multiple partitions; only one per partition</span></label>
           <div id="clone-preset-cats" class="preset-categories"></div>
           <div id="clone-preset-chips" class="preset-chips"></div></div>
-        <div class="field"><label for="clone-av-theme">Theme Prompt</label>
-          <input id="clone-av-theme" type="text" maxlength="300"/></div>
         <div id="clone-av-preview-area" class="avatar-preview-wrap" hidden>
           <div class="avatar-preview-img-wrap">
             <img id="clone-av-preview-img" class="avatar-preview-img" alt="Clone Preview"/>
@@ -392,13 +397,13 @@
           </label>
         </div>
         <div id="nav-style-block">
-          <div class="field"><label>Style Presets <span class="field-note">Select multiple</span></label>
+          <div class="field"><label for="nav-theme-input">Custom Prompt <span class="field-note">Optional — overrides any preset on conflict</span></label>
+            <input id="nav-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
+          <div class="field"><label>Style Presets <span class="field-note">Select from multiple partitions; only one per partition</span></label>
             <div id="nav-preset-cats" class="preset-categories"></div>
             <div id="nav-preset-chips" class="preset-chips"></div>
             <div id="nav-prompt-preview" class="prompt-preview" hidden></div>
           </div>
-          <div class="field"><label for="nav-theme-input">Custom Prompt <span class="field-note">Optional</span></label>
-            <input id="nav-theme-input" type="text" placeholder="e.g. futuristic neon armor" maxlength="300"/></div>
         </div>
         <p id="nav-status" class="status-msg"></p>
       </div>
@@ -467,8 +472,9 @@
           <div id="vd-preset-indicator" hidden style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:var(--secondary);font-weight:500"></div>
         </div>
         <div class="field">
-          <label>Quick Presets <span class="field-note">Click to apply — type in the field above to use custom</span></label>
-          <div id="vd-preset-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"></div>
+          <label>Quick Presets <span class="field-note">Pick one per partition; multiple partitions stack into the voice brief</span></label>
+          <div id="vd-preset-cats" class="preset-categories"></div>
+          <div id="vd-preset-chips" class="preset-chips"></div>
         </div>
         <p id="vd-design-status" class="status-msg"></p>
       </div>

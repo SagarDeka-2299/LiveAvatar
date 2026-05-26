@@ -8,7 +8,11 @@ let VOICE_PRESETS=[];
 /* ── State ── */
 let studio=[],assistants=[],voices=[];
 let selectedPersonaId=null,selectedAvatarId=null,selectedAssistantId=null,selectedVoiceId=null;
-let vdSelectedPresetId=null;
+// Voice design preset multi-select state — list of currently-selected
+// VOICE_PRESETS ids (at most one per partition; enforced in
+// renderPresetUI + revalidated server-side).
+let vdSelectedVoicePresetIds=[];
+let vdVoiceCat="All";
 let pvPresets=[],pvPresetCat="All";
 let clonePresets=[],clonePresetCat="All";
 let pvDroppedVoiceId=null;
@@ -35,6 +39,9 @@ function _ensureTick(){
 }
 let cropper=null,sourceFile=null,sourceUrl="",croppedBlob=null,croppedUrl="";
 let pollTimer=null;
+// Short-burst follow-up timer used by refreshAll() to re-poll a little
+// sooner than the 3s startPolling tick when a background task is mid-flight.
+let studioTimer=null;
 let lkRoom=null,_pendingDelete=null;
 
 const $=id=>document.getElementById(id);
@@ -54,19 +61,75 @@ function revoke(url){if(url)URL.revokeObjectURL(url);}
    query parameters. See README for the full contract. */
 const TENANT_ID="local_tenant";
 
-/* ── Presets ── */
-function renderPresetUI(catsEl,chipsEl,selArr,cat,gender,onToggle,onCat){
+/* ── Presets v2 ──
+ * Each preset row: { id, category, partition, subcategory, gender, prompt }
+ *
+ * Rendering: category tabs across the top, then for the selected category
+ * (or "All") we render a partition header for every partition followed by
+ * the chip row of its subcategories.
+ *
+ * Selection rules enforced here AND server-side:
+ *   - multiple categories simultaneously: ✓
+ *   - multiple partitions within a category: ✓
+ *   - within a single partition: AT MOST ONE chip (mutually exclusive)
+ *   - subcategories whose gender ∉ {"unisex", persona.gender} are hidden
+ *
+ * `pool` is `PRESETS` or `VOICE_PRESETS` — same shape, same rules. */
+function renderPresetUI(catsEl,chipsEl,selArr,cat,gender,onToggle,onCat,pool){
   if(!catsEl||!chipsEl)return;
-  const cats=["All",...new Set(PRESETS.filter(p=>p.gender==="all"||gender==="unknown"||p.gender===gender).map(p=>p.cat))];
+  pool=pool||PRESETS;
+  const visible=pool.filter(p=>p.gender==="unisex"||gender==="unknown"||p.gender===gender);
+
+  // ── Category tabs ──
+  const cats=["All",...new Set(visible.map(p=>p.category))];
   catsEl.innerHTML="";
   cats.forEach(c=>{const b=document.createElement("button");b.type="button";b.className="preset-cat-btn"+(c===cat?" active":"");b.textContent=c;b.onclick=()=>onCat(c);catsEl.appendChild(b);});
+
+  // ── Chips, grouped by partition ──
   chipsEl.innerHTML="";
-  PRESETS.filter(p=>(cat==="All"||p.cat===cat)&&(p.gender==="all"||gender==="unknown"||p.gender===gender)).forEach(pr=>{
-    const ch=document.createElement("button");ch.type="button";ch.className="preset-chip"+(selArr.includes(pr.id)?" selected":"");
-    ch.textContent=pr.label;ch.onclick=()=>{onToggle(pr.id);ch.classList.toggle("selected");};chipsEl.appendChild(ch);
+  const inScope=visible.filter(p=>cat==="All"||p.category===cat);
+
+  // Group: { "Category / Partition": [...presets...] } preserving insertion order
+  const groups=new Map();
+  inScope.forEach(p=>{
+    const key=p.category+" / "+p.partition;
+    if(!groups.has(key))groups.set(key,{partition:p.partition,category:p.category,items:[]});
+    groups.get(key).items.push(p);
+  });
+
+  groups.forEach(({partition,category,items},key)=>{
+    const header=document.createElement("div");
+    header.className="preset-partition";
+    header.textContent=cat==="All"?(category+" · "+partition):partition;
+    chipsEl.appendChild(header);
+    items.forEach(pr=>{
+      const ch=document.createElement("button");
+      ch.type="button";
+      ch.className="preset-chip"+(selArr.includes(pr.id)?" selected":"");
+      ch.textContent=pr.subcategory;
+      ch.dataset.partition=key;
+      ch.onclick=()=>{
+        const wasSelected=selArr.includes(pr.id);
+        // Mutual exclusion: deselect any other selected chip in this partition.
+        for(let i=selArr.length-1;i>=0;i--){
+          const other=pool.find(p=>p.id===selArr[i]);
+          if(other && other.category===category && other.partition===partition && other.id!==pr.id){
+            selArr.splice(i,1);
+          }
+        }
+        // Toggle the clicked chip.
+        const idx=selArr.indexOf(pr.id);
+        if(idx>=0)selArr.splice(idx,1); else selArr.push(pr.id);
+        // Re-render the chip row so siblings repaint as deselected.
+        renderPresetUI(catsEl,chipsEl,selArr,cat,gender,onToggle,onCat,pool);
+        // Notify the caller (e.g. to refresh the assembled prompt preview).
+        if(onToggle)onToggle(pr.id,!wasSelected);
+      };
+      chipsEl.appendChild(ch);
+    });
   });
 }
-const p2prompt=sel=>sel.map(id=>PRESETS.find(p=>p.id===id)?.label).filter(Boolean).join(", ");
+const p2prompt=sel=>sel.map(id=>PRESETS.find(p=>p.id===id)?.subcategory).filter(Boolean).join(", ");
 
 /* ── Cropper ── */
 function destroyCropper(){if(cropper){cropper.destroy();cropper=null;}}
@@ -112,7 +175,7 @@ async function playDefaultVoicePreview(){
     // /voices/preview-default is POST with a JSON body now — can't be used
     // directly as an <audio> src. Fetch the bytes, wrap in a blob URL.
     try{
-      const _r=await fetch("/voices/preview-default",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      const _r=await fetch(`/${TENANT_ID}/voices/preview-default`);
       if(!_r.ok)throw new Error("no default preview");
       const blob=await _r.blob();
       el.src=URL.createObjectURL(blob);
@@ -137,7 +200,7 @@ function renderLeftPersonas(){
       info.innerHTML=`<div class="entity-name">${esc(p.name)}</div><div class="entity-stage">${esc(stageLabel(p.status,p.stage))}</div>`;
       const cancelBtn=document.createElement("button");cancelBtn.className="entity-delete-btn";cancelBtn.textContent="✕";cancelBtn.title="Cancel";
       cancelBtn.onclick=e=>{e.stopPropagation();cancelBtn.disabled=true;
-        fetch(`/personas/${p.id}/cancel`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
+        fetch(`/${TENANT_ID}/personas/${p.id}/cancel`,{method:"POST"}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
       card.append(thumb,info,cancelBtn);
     }else{
       const g=p.gender==="female"?"female":p.gender==="male"?"male":"unknown";
@@ -205,7 +268,7 @@ function renderLeftAvatars(){
       info.innerHTML=`<div class="entity-name">${esc(av.name)}</div><div class="entity-stage">${esc(stageLabel(av.status,av.stage))}</div>`;
       const cancelBtn=document.createElement("button");cancelBtn.className="entity-delete-btn";cancelBtn.textContent="✕";cancelBtn.title="Cancel";cancelBtn.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       cancelBtn.onclick=e=>{e.stopPropagation();cancelBtn.disabled=true;
-        fetch(`/avatars/${av.id}/cancel`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
+        fetch(`/${TENANT_ID}/avatars/${av.id}/cancel`,{method:"POST"}).then(refreshAll).catch(()=>{cancelBtn.disabled=false;});};
       card.append(thumb,info,cancelBtn);
       card.addEventListener("click",()=>{selectedAvatarId=av.id;showView("avatar");});
     }else if(av.status==="failed"){
@@ -224,7 +287,7 @@ function renderLeftAvatars(){
       const btn=document.createElement("button");btn.className="btn-retry-sm";btn.dataset.rk=rk;
       btn.textContent=secs>0?`Retry in ${secs}s`:"↻ Retry";btn.disabled=secs>0;
       btn.onclick=async e=>{e.stopPropagation();btn.disabled=true;
-        try{await fetch(`/avatars/${av.id}/retry`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(r=>{if(!r.ok)throw new Error("retry failed");});await refreshAll();}
+        try{await fetch(`/${TENANT_ID}/avatars/${av.id}/retry`,{method:"POST"}).then(r=>{if(!r.ok)throw new Error("retry failed");});await refreshAll();}
         catch(e){if(isRateLimitError(e.message)){_setRetry(rk);_ensureTick();}else{alert("Retry failed: "+e.message);}btn.disabled=false;}};
       card.appendChild(btn);if(rl)_ensureTick();
       card.appendChild(del);
@@ -271,7 +334,7 @@ function renderLeftVoices(){
       info.innerHTML=`<div class="voice-card-name">${esc(v.name)}</div><div class="entity-stage err" title="${esc(v.last_error||'')}">✗ ${esc(errSnip)}</div>`;
       const retry=document.createElement("button");retry.className="btn-retry-sm";retry.textContent="↻ Retry";retry.title="Retry";
       retry.onclick=async e=>{e.stopPropagation();retry.disabled=true;retry.textContent="…";
-        try{await fetch(`/voices/${v.id}/retry`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})}).then(r=>{if(!r.ok)throw new Error("retry failed");});await refreshAll();}
+        try{await fetch(`/${TENANT_ID}/voices/${v.id}/retry`,{method:"POST"}).then(r=>{if(!r.ok)throw new Error("retry failed");});await refreshAll();}
         catch(er){alert("Retry failed: "+er.message);retry.disabled=false;retry.textContent="↻ Retry";}};
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";del.style.cssText="color:var(--red);background:rgba(244,63,94,0.14)";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("voice",v.id,v.name);};
@@ -382,8 +445,9 @@ function initPersonaView(){
   const en=$("edit-persona-name");if(en)en.value=p.name;
   setStatus($("edit-persona-status"),"");
   const gender=p.gender||"unknown";
+  // renderPresetUI now owns the selection state — onToggle is notify-only.
   renderPresetUI($("pv-preset-cats"),$("pv-preset-chips"),pvPresets,pvPresetCat,gender,
-    id=>{const i=pvPresets.indexOf(id);i>=0?pvPresets.splice(i,1):pvPresets.push(id);renderAvPromptPreview();},
+    ()=>renderAvPromptPreview(),
     cat=>{pvPresetCat=cat;initPersonaView();});
   const avName=$("av-name-input");if(avName)avName.value=p.name;
   setStatus($("av-status"),"");
@@ -403,7 +467,7 @@ function setupPvVoiceDropSlot(p){
       const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");
       if(d.type==="voice"){pvDroppedVoiceId=d.id;renderPvVoiceSlot();}
       else if(d.type==="library-voice"){
-        const _r=await fetch("/voices/from-library",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,voice_id:d.voice_id,name:d.name,preview_url:d.preview_url})});
+        const _r=await fetch(`/${TENANT_ID}/voices/from-library`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({voice_id:d.voice_id,name:d.name,preview_url:d.preview_url})});
         if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voices/from-library failed");
         const v=await _r.json();
         if(!voices.find(x=>x.id===v.id))voices=[v,...voices];
@@ -450,7 +514,7 @@ $("pv-voice-unlink-btn")?.addEventListener("click",async()=>{
   const p=getPersona();if(!p)return;
   if(!confirm("Unlink voice from this persona?"))return;
   try{
-    await fetch(`/personas/${p.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,voice_ref_id:null})});
+    await fetch(`/${TENANT_ID}/personas/${p.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({voice_ref_id:null})});
     pvDroppedVoiceId=null;renderPvVoiceSlot();
     await refreshAll();initPersonaView();
   }catch(e){setStatus($("edit-persona-status"),e.message,"error");}
@@ -489,7 +553,7 @@ function initAvatarView(){
   const cn=$("clone-av-name");if(cn)cn.value=av.name+" Clone";
   const ct=$("clone-av-theme");if(ct)ct.value=av.theme_prompt||"";
   renderPresetUI($("clone-preset-cats"),$("clone-preset-chips"),clonePresets,clonePresetCat,p.gender||"unknown",
-    id=>{const i=clonePresets.indexOf(id);i>=0?clonePresets.splice(i,1):clonePresets.push(id);},
+    ()=>{},
     cat=>{clonePresetCat=cat;initAvatarView();});
   const cap=$("clone-av-preview-area");if(cap)cap.hidden=true;setStatus($("clone-av-status"),"");
 }
@@ -503,8 +567,8 @@ $("avv-save-avatar-btn").addEventListener("click",async()=>{
     fd.append("persona_id",p.id);fd.append("name",av.name);
     fd.append("decoration",av.decoration||"");fd.append("theme_prompt",av.theme_prompt||"");
     fd.append("preset_ids",JSON.stringify(av.preset_ids||[]));
-    fd.append("draft_avatar_id",av.id);fd.append("tenant_id",TENANT_ID);
-    {const _r=await fetch("/avatars",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar save failed");}
+    fd.append("draft_avatar_id",av.id);
+    {const _r=await fetch(`/${TENANT_ID}/avatars`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar save failed");}
     setStatus($("avv-save-status"),"Saved!","success");await refreshAll();
   }catch(e){setStatus($("avv-save-status"),e.message,"error");}
   finally{btn.disabled=false;}
@@ -552,41 +616,44 @@ function initVoiceDesignView(){
       try{const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");if(d.type!=="persona")return;vdDroppedPersonaId=d.id;renderVdPersonaSlot();}catch{}
     };
   }
-  // Reset preset indicator
-  vdSelectedPresetId=null;
+  // Voice design uses the same multi-select preset UI as the avatar
+  // wizard — same renderPresetUI, just sourced from VOICE_PRESETS.
+  // Selected ids accumulate in `vdSelectedVoicePresetIds`; the submit
+  // handler sends them as repeated `voice_preset_ids` multipart fields.
+  vdSelectedVoicePresetIds.length=0;
   const ind=$("vd-preset-indicator");if(ind)ind.hidden=true;
-  const descEl2=$("vd-description");if(descEl2){descEl2.readOnly=false;descEl2.classList.remove("preset-locked");descEl2.placeholder="e.g. warm, confident, professional female narrator";}
-  // Render preset chips
-  const chipsEl=$("vd-preset-chips");
-  if(chipsEl){
-    chipsEl.innerHTML="";
-    VOICE_PRESETS.forEach(vp=>{
-      const btn=document.createElement("button");btn.type="button";btn.className="voice-preset-chip";btn.textContent=vp.label;btn.dataset.presetId=vp.id;
-      btn.onclick=()=>applyVoicePreset(vp.id,vp.label);
-      chipsEl.appendChild(btn);
-    });
-  }
+  const descEl2=$("vd-description");
+  if(descEl2){descEl2.readOnly=false;descEl2.classList.remove("preset-locked");descEl2.placeholder="e.g. warm, confident, professional female narrator";}
+  renderVdPresets();
   // Ensure design tab is active
   document.querySelector('.tab-btn[data-tab="vd-design"]')?.click();
 }
 
-function applyVoicePreset(id,label){
-  vdSelectedPresetId=id;
-  const d=$("vd-description");
-  if(d){d.value="";d.readOnly=true;d.classList.add("preset-locked");d.placeholder=label;}
-  const ind=$("vd-preset-indicator");
-  if(ind){
-    ind.hidden=false;
-    ind.innerHTML=`<span style="color:var(--secondary);font-weight:600">✦ Preset: ${esc(label)}</span><button type="button" onclick="clearVoicePreset()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:0 0 0 6px">✕</button>`;
-  }
-  document.querySelectorAll(".voice-preset-chip").forEach(b=>{b.classList.toggle("selected",b.dataset.presetId===id);});
+// Stable closure used as both the initial render AND the onCat callback,
+// so clicking category tabs always re-renders the chip grid (without it,
+// the second click only updates the state variable and the DOM goes stale).
+function renderVdPresets(){
+  const catsEl=$("vd-preset-cats"),chipsEl=$("vd-preset-chips");
+  if(!catsEl||!chipsEl)return;
+  // Filter by the linked persona's gender if one was dropped, else show all.
+  const linkedPersona=vdDroppedPersonaId?studio.find(p=>p.id===vdDroppedPersonaId):null;
+  const gender=linkedPersona?.gender||"unknown";
+  renderPresetUI(catsEl,chipsEl,vdSelectedVoicePresetIds,vdVoiceCat,gender,
+    ()=>refreshVdPresetIndicator(),
+    cat=>{vdVoiceCat=cat;renderVdPresets();},
+    VOICE_PRESETS);
 }
-function clearVoicePreset(){
-  vdSelectedPresetId=null;
-  const d=$("vd-description");
-  if(d){d.value="";d.readOnly=false;d.classList.remove("preset-locked");d.placeholder="e.g. warm, confident, professional female narrator";}
-  const ind=$("vd-preset-indicator");if(ind)ind.hidden=true;
-  document.querySelectorAll(".voice-preset-chip").forEach(b=>b.classList.remove("selected"));
+
+function refreshVdPresetIndicator(){
+  const ind=$("vd-preset-indicator");if(!ind)return;
+  const n=vdSelectedVoicePresetIds.length;
+  if(!n){ind.hidden=true;return;}
+  const labels=vdSelectedVoicePresetIds
+    .map(id=>VOICE_PRESETS.find(p=>p.id===id)?.subcategory)
+    .filter(Boolean)
+    .join(" · ");
+  ind.hidden=false;
+  ind.innerHTML=`<span style="color:var(--secondary);font-weight:600">✦ ${n} preset${n!==1?"s":""}: ${esc(labels)}</span>`;
 }
 
 function renderVdPersonaSlot(){
@@ -607,16 +674,18 @@ $("vd-design-submit-btn")?.addEventListener("click",async()=>{
   const description=($("vd-description")?.value||"").trim();
   const btn=$("vd-design-submit-btn"),statusEl=$("vd-design-status");
   const includePersona=$("vd-include-persona")?.checked&&!!vdDroppedPersonaId;
-  if(!vdSelectedPresetId&&!description&&!includePersona){setStatus(statusEl,"Please describe the voice, select a preset, or enable persona voice profile.","error");return;}
+  const hasPresets=vdSelectedVoicePresetIds.length>0;
+  if(!hasPresets&&!description&&!includePersona){setStatus(statusEl,"Please describe the voice, pick at least one preset, or enable persona voice profile.","error");return;}
   btn.disabled=true;setStatus(statusEl,"Creating voice…");
   try{
     const fd=new FormData();
     fd.append("name",name);
-    if(vdSelectedPresetId){fd.append("voice_preset_id",vdSelectedPresetId);}
-    else{fd.append("description",description);}
+    // Repeated multipart field — FastAPI binds to ``voice_preset_ids: list[str]``.
+    vdSelectedVoicePresetIds.forEach(id=>fd.append("voice_preset_ids",id));
+    if(description)fd.append("description",description);
     if(vdDroppedPersonaId){fd.append("persona_id",String(vdDroppedPersonaId));fd.append("include_persona_traits",includePersona?"true":"false");}
-    fd.append("tenant_id",TENANT_ID);
-    {const _r=await fetch("/voices/design",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voice design failed");}
+
+    {const _r=await fetch(`/${TENANT_ID}/voices/design`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voice design failed");}
     setStatus(statusEl,"Voice design started — watch the Voices panel.","success");
     await refreshAll();
   }catch(e){setStatus(statusEl,e.message,"error");}
@@ -637,8 +706,8 @@ $("vd-clone-submit-btn")?.addEventListener("click",async()=>{
   const btn=$("vd-clone-submit-btn"),statusEl=$("vd-clone-status");
   btn.disabled=true;setStatus(statusEl,"Cloning voice…");
   try{
-    const fd=new FormData();fd.append("voice_sample",vdCloneSampleFile,vdCloneSampleFile.name);fd.append("name",name);fd.append("tenant_id",TENANT_ID);
-    {const _r=await fetch("/voices/clone",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voice clone failed");}
+    const fd=new FormData();fd.append("voice_sample",vdCloneSampleFile,vdCloneSampleFile.name);fd.append("name",name);
+    {const _r=await fetch(`/${TENANT_ID}/voices/clone`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voice clone failed");}
     setStatus(statusEl,"Voice cloning started — watch the Voices panel.","success");
     await refreshAll();
   }catch(e){setStatus(statusEl,e.message,"error");}
@@ -666,8 +735,8 @@ $("create-persona-btn").addEventListener("click",async()=>{
   if(!croppedBlob)return setStatus($("persona-status"),"Crop an image first.","error");
   $("create-persona-btn").disabled=true;setStatus($("persona-status"),"Uploading…");
   try{
-    const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.png");fd.append("tenant_id",TENANT_ID);
-    const _r=await fetch("/personas",{method:"POST",body:fd});
+    const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.png");
+    const _r=await fetch(`/${TENANT_ID}/personas`,{method:"POST",body:fd});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"persona create failed");
     const p=await _r.json();
     croppedBlob=null;revoke(croppedUrl);croppedUrl="";revoke(sourceUrl);sourceUrl="";sourceFile=null;$("persona-image-input").value="";
@@ -682,7 +751,7 @@ $("save-persona-btn").addEventListener("click",async()=>{
   $("save-persona-btn").disabled=true;
   try{
     const body={name,voice_ref_id:pvDroppedVoiceId||null};
-    await fetch(`/personas/${selectedPersonaId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,...body})});
+    await fetch(`/${TENANT_ID}/personas/${selectedPersonaId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body})});
     setStatus($("edit-persona-status"),"Saved!","success");await refreshAll();initPersonaView();
   }
   catch(e){setStatus($("edit-persona-status"),e.message,"error");}finally{$("save-persona-btn").disabled=false;}
@@ -695,7 +764,7 @@ function renderAvPromptPreview(){
   const grouped={};
   pvPresets.forEach(id=>{
     const p=PRESETS.find(x=>x.id===id);if(!p)return;
-    (grouped[p.cat]=grouped[p.cat]||[]).push(p.label);
+    (grouped[p.category]=grouped[p.category]||[]).push(p.subcategory);
   });
   const order=["Outfit","Hair","Facial Hair","Makeup","Accessories","Jewelry","Background"];
   const labelMap={Outfit:"Clothing"};
@@ -714,7 +783,7 @@ async function genAvatarPreview(personaId,name,sel,themeEl,previewAreaEl,imgEl,s
   const tp=[p2prompt(sel),themeEl?.value.trim()||""].filter(Boolean).join(", ");
   setStatus(statusEl,"Generating preview…");if(previewAreaEl)previewAreaEl.hidden=true;
   const fd=new FormData();fd.append("persona_id",personaId);fd.append("name",name);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(sel));
-  const _r=await fetch("/avatars/preview",{method:"POST",body:fd});
+  const _r=await fetch(`/${TENANT_ID}/avatars/preview`,{method:"POST",body:fd});
   if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");
   const data=await _r.json();
   if(imgEl&&data.preview_url)imgEl.src=data.preview_url;if(previewAreaEl)previewAreaEl.hidden=false;
@@ -742,8 +811,8 @@ $("av-generate-btn").addEventListener("click",async()=>{
     fd.append("preset_ids",JSON.stringify(skipStyle?[]:pvPresets));
     fd.append("custom_prompt",skipStyle?"":customPrompt);
     fd.append("skip_style",skipStyle?"true":"false");
-    fd.append("tenant_id",TENANT_ID);
-    {const _r=await fetch("/avatars/preview",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");}
+    
+    {const _r=await fetch(`/${TENANT_ID}/avatars/preview`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");}
     pvPresets=[];pvPresetCat="All";if(nameEl)nameEl.value=p.name;
     const ti=$("av-theme-input");if(ti)ti.value="";
     const sk=$("av-skip-style");if(sk)sk.checked=false;applyAvSkipStyle();
@@ -768,7 +837,7 @@ function renderNavPersonaSlot(){
 function renderNavPromptPreview(){
   const el=$("nav-prompt-preview");if(!el)return;
   const grouped={};
-  navPresets.forEach(id=>{const pr=PRESETS.find(x=>x.id===id);if(!pr)return;(grouped[pr.cat]=grouped[pr.cat]||[]).push(pr.label);});
+  navPresets.forEach(id=>{const pr=PRESETS.find(x=>x.id===id);if(!pr)return;(grouped[pr.category]=grouped[pr.category]||[]).push(pr.subcategory);});
   const order=["Outfit","Hair","Facial Hair","Makeup","Accessories","Jewelry","Background"];
   const labelMap={Outfit:"Clothing"};
   const lines=[];
@@ -779,7 +848,7 @@ function renderNavPresets(){
   const p=navDroppedPersonaId?studio.find(x=>x.id===navDroppedPersonaId):null;
   const gender=p?.gender||"unknown";
   renderPresetUI($("nav-preset-cats"),$("nav-preset-chips"),navPresets,navPresetCat,gender,
-    id=>{const i=navPresets.indexOf(id);i>=0?navPresets.splice(i,1):navPresets.push(id);renderNavPromptPreview();},
+    ()=>renderNavPromptPreview(),
     cat=>{navPresetCat=cat;renderNavPresets();});
 }
 function initNewAvatarView(){
@@ -823,8 +892,8 @@ $("nav-generate-btn").addEventListener("click",async()=>{
     fd.append("preset_ids",JSON.stringify(skipStyle?[]:navPresets));
     fd.append("custom_prompt",skipStyle?"":customPrompt);
     fd.append("skip_style",skipStyle?"true":"false");
-    fd.append("tenant_id",TENANT_ID);
-    {const _r=await fetch("/avatars/preview",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");}
+    
+    {const _r=await fetch(`/${TENANT_ID}/avatars/preview`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");}
     navPresets=[];navPresetCat="All";if(nameEl)nameEl.value="";
     const ti=$("nav-theme-input");if(ti)ti.value="";
     const sk=$("nav-skip-style");if(sk)sk.checked=false;applyNavSkipStyle();
@@ -871,7 +940,7 @@ $("na-create-asst-btn").addEventListener("click",async()=>{
   if(!name||!prompt){setStatus($("na-asst-status"),"Name and instructions required.","error");return;}
   const btn=$("na-create-asst-btn");btn.disabled=true;setStatus($("na-asst-status"),"Creating…");
   try{
-    const _r=await fetch("/assistants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,name,prompt,first_message:fm||"Hi!",persona_id:ownerPersona.id,avatar_id:av.id})});
+    const _r=await fetch(`/${TENANT_ID}/assistants`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,prompt,first_message:fm||"Hi!",persona_id:ownerPersona.id,avatar_id:av.id})});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"assistant create failed");
     const r=await _r.json();
     setStatus($("na-asst-status"),`'${r.name}' created!`,"success");await refreshAll();
@@ -910,7 +979,7 @@ $("create-asst-btn").addEventListener("click",async()=>{
   if(!name||!prompt)return setStatus($("asst-status"),"Name and instructions required.","error");
   $("create-asst-btn").disabled=true;setStatus($("asst-status"),"Creating…");
   try{
-    const _r=await fetch("/assistants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,name,prompt,first_message:fm||"Hi!",persona_id:p.id,avatar_id:av.id})});
+    const _r=await fetch(`/${TENANT_ID}/assistants`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,prompt,first_message:fm||"Hi!",persona_id:p.id,avatar_id:av.id})});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"assistant create failed");
     const r=await _r.json();
     setStatus($("asst-status"),`'${r.name}' created!`,"success");
@@ -933,8 +1002,8 @@ $("clone-av-save-btn").addEventListener("click",async()=>{
   const tp=[p2prompt(clonePresets),$("clone-av-theme")?.value.trim()||""].filter(Boolean).join(", ");
   $("clone-av-save-btn").disabled=true;setStatus($("clone-av-status"),"Saving…");
   try{
-    const fd=new FormData();fd.append("persona_id",p.id);fd.append("name",name);fd.append("decoration",tp);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(clonePresets));fd.append("tenant_id",TENANT_ID);
-    {const _r=await fetch("/avatars",{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar save failed");}setStatus($("clone-av-status"),"Clone queued!","success");await refreshAll();
+    const fd=new FormData();fd.append("persona_id",p.id);fd.append("name",name);fd.append("decoration",tp);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(clonePresets));
+    {const _r=await fetch(`/${TENANT_ID}/avatars`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar save failed");}setStatus($("clone-av-status"),"Clone queued!","success");await refreshAll();
   }catch(e){setStatus($("clone-av-status"),e.message,"error");}finally{$("clone-av-save-btn").disabled=false;}
 });
 
@@ -946,7 +1015,7 @@ $("clone-asst-btn").addEventListener("click",async()=>{
   if(!name||!prompt)return setStatus($("clone-asst-status"),"Name and instructions required.","error");
   $("clone-asst-btn").disabled=true;setStatus($("clone-asst-status"),"Creating…");
   try{
-    const _r=await fetch("/assistants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,name,prompt,first_message:fm,persona_id:asst.persona_id,avatar_id:asst.avatar_id})});
+    const _r=await fetch(`/${TENANT_ID}/assistants`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,prompt,first_message:fm,persona_id:asst.persona_id,avatar_id:asst.avatar_id})});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"assistant clone failed");
     const r=await _r.json();
     setStatus($("clone-asst-status"),`'${r.name}' created!`,"success");
@@ -1012,7 +1081,7 @@ function openDeleteModal(type,id,name){
   $("delete-modal-body").textContent=`"${name}" will be permanently removed.`;$("delete-modal-cascade").hidden=true;
   (async()=>{try{
     if(type==="persona"){
-      const _r=await fetch(`/personas/${id}/cascade-count`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      const _r=await fetch(`/${TENANT_ID}/personas/${id}/cascade-count`);
       const c=await _r.json();
       const pts=[];
       if(c.avatars)pts.push(`${c.avatars} avatar${c.avatars!==1?"s":""}`);
@@ -1020,7 +1089,7 @@ function openDeleteModal(type,id,name){
       if(pts.length){$("delete-modal-cascade-text").textContent=`Will leave ${pts.join(" and ")} orphaned.`;$("delete-modal-cascade").hidden=false;}
     }
     else if(type==="avatar"){
-      const _r=await fetch(`/avatars/${id}/cascade-count`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      const _r=await fetch(`/${TENANT_ID}/avatars/${id}/cascade-count`);
       const c=await _r.json();
       if(c.assistants){$("delete-modal-cascade-text").textContent=`Will leave ${c.assistants} assistant${c.assistants!==1?"s":""} orphaned.`;$("delete-modal-cascade").hidden=false;}
     }
@@ -1033,7 +1102,7 @@ $("delete-confirm-btn").addEventListener("click",async()=>{
   try{
     const path=type==="assistant"?"assistants":type==="avatar"?"avatars":type==="voice"?"voices":"personas";
     {
-      const _r=await fetch(`/${path}/${id}`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID})});
+      const _r=await fetch(`/${TENANT_ID}/${path}/${id}`,{method:"DELETE"});
       if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"delete failed");
     }
     $("delete-modal").hidden=true;_pendingDelete=null;
@@ -1064,7 +1133,7 @@ async function launchCall(){
   if(!window.LivekitClient){alert("LiveKit client not loaded yet — try again in a moment.");return;}
   const {Room,RoomEvent,Track}=window.LivekitClient;
   try{
-    const _r=await fetch("/calls",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tenant_id:TENANT_ID,assistant_id:asst.id})});
+    const _r=await fetch(`/${TENANT_ID}/calls`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({assistant_id:asst.id})});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"call create failed");
     const data=await _r.json();
     $("call-title").textContent=asst.name;
@@ -1141,47 +1210,31 @@ async function loadPresets(){
   VOICE_PRESETS=data.voice_presets||[];
 }
 
-// POST /personas/list — body { tenant_id }. Filters + limit + offset
-// would go on the URL as ?gender=female&limit=20&offset=0.
+// GET /personas?tenant_id=… — filters and pagination would go on the URL too,
+// e.g. ?tenant_id=…&gender=female&limit=20&offset=0.
 async function loadStudio(){
-  const r=await fetch("/personas/list",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({tenant_id:TENANT_ID}),
-  });
+  const r=await fetch(`/${TENANT_ID}/personas`);
   studio=await r.json();
 }
 
-// POST /assistants/list — same shape as /personas/list.
+// GET /assistants?tenant_id=…
 async function loadAssistants(){
-  const r=await fetch("/assistants/list",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({tenant_id:TENANT_ID}),
-  });
+  const r=await fetch(`/${TENANT_ID}/assistants`);
   assistants=await r.json();
 }
 
-// POST /voices/list — filters (gender, source, provider, status,
-// persona_id) and pagination would go on the URL.
+// GET /voices?tenant_id=… — filters (gender, source, provider, status,
+// persona_id) and pagination would also go on the URL.
 async function loadVoices(){
-  const r=await fetch("/voices/list",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({tenant_id:TENANT_ID}),
-  });
+  const r=await fetch(`/${TENANT_ID}/voices`);
   voices=await r.json();
 }
 
-// POST /voices/library — ElevenLabs's premade catalogue, cached server-side.
+// GET /voices/library?tenant_id=… — ElevenLabs's premade catalogue.
 async function loadLibraryVoices(){
   if(libraryVoices.length)return;
   try{
-    const r=await fetch("/voices/library",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({tenant_id:TENANT_ID}),
-    });
+    const r=await fetch(`/${TENANT_ID}/voices/library`);
     libraryVoices=await r.json();
   }catch{}
 }

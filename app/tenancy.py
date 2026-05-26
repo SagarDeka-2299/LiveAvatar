@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Union
 
-from fastapi import Form, HTTPException
+from fastapi import HTTPException
+from fastapi import Path as PathParam
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -339,17 +340,23 @@ async def open_background_context(tenant_id: str) -> AsyncIterator[TenantContext
 
 # ── FastAPI dependency helpers ──
 #
-# Two flavours, one per common way the API receives ``tenant_id``:
-#   * ``tenant_ctx_form``  — for multipart file-upload routes (tenant_id
-#                             comes in as a form field).
-#   * Routes with a JSON body extract ``payload.tenant_id`` themselves and
-#     use ``open_background_context`` directly. No tenant_id ever appears in
-#     the URL.
+# Every business route is mounted under the ``/{tenant_id}/...`` prefix.
+# ``tenant_ctx`` is a FastAPI dependency that reads ``tenant_id`` from the
+# path, resolves the per-tenant Postgres + Azure Blob, and yields a fully
+# assembled ``TenantContext``. Background tasks that outlive the request
+# open their own context via ``open_background_context``.
 
 
-async def tenant_ctx_form(
-    tenant_id: str = Form(..., min_length=1, max_length=63),
+async def tenant_ctx(
+    tenant_id: str = PathParam(..., min_length=1, max_length=63),
 ) -> AsyncIterator[TenantContext]:
+    """Yield a tenant-scoped context resolved from the path ``{tenant_id}``.
+
+    Commits on success, rolls back on exception, always closes the
+    session. The tenant id is validated against ``app.keyvault`` rules
+    inside ``_enter_tenant_context`` — the ``Path(...)`` constraints
+    here are an additional pre-filter (length only).
+    """
     ctx, session = await _enter_tenant_context(tenant_id)
     try:
         yield ctx

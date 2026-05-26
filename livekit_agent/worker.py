@@ -117,6 +117,15 @@ def _build_stt():
     raise RuntimeError(f"Unsupported STT_PROVIDER: {provider}")
 
 
+def _default_call_llm_model(provider: str) -> str:
+    """Pick the env-configured default model for the given LLM provider."""
+    if provider == "gemini":
+        return settings.call_llm_model_gemini
+    if provider == "azure_openai":
+        return settings.call_llm_model_azure_openai
+    return settings.call_llm_model_openai
+
+
 def _build_llm(provider: str, model: str):
     if provider == "openai":
         from livekit.plugins import openai
@@ -126,6 +135,18 @@ def _build_llm(provider: str, model: str):
         from livekit.plugins import google
 
         return google.LLM(model=model, api_key=settings.gemini_api_key or None)
+    if provider == "azure_openai":
+        from livekit.plugins import openai
+
+        # Uses the gpt-4o deployment configured via AZURE_OPENAI_*.
+        # ``model`` here is the deployment name (Azure routes by
+        # deployment, not by model identifier).
+        return openai.LLM.with_azure(
+            azure_deployment=model or settings.azure_openai_deployment,
+            azure_endpoint=settings.azure_openai_endpoint,
+            api_key=settings.azure_openai_api_key or None,
+            api_version=settings.azure_openai_api_version,
+        )
     raise RuntimeError(f"Unsupported LLM provider: {provider}")
 
 
@@ -252,12 +273,10 @@ async def entrypoint(ctx: JobContext) -> None:
             "Do not use bullet points, numbered lists, or markdown — speak in plain natural sentences."
         )) + _LANGUAGE_LOCK
         first_message = str(assistant.get("first_message") or "")
-        llm_provider = (str(assistant.get("llm_provider") or settings.llm_provider)).lower()
-        if llm_provider not in {"openai", "gemini"}:
-            llm_provider = settings.llm_provider
-        llm_model = str(assistant.get("llm_model") or "") or (
-            settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
-        )
+        llm_provider = (str(assistant.get("llm_provider") or settings.call_llm_provider)).lower()
+        if llm_provider not in {"openai", "gemini", "azure_openai"}:
+            llm_provider = settings.call_llm_provider
+        llm_model = str(assistant.get("llm_model") or "") or _default_call_llm_model(llm_provider)
         # The persona is the authoritative source for voice: users may change
         # the persona's voice after the assistant was created. Fall back to the
         # assistant's snapshot only if the persona has nothing set.
@@ -278,8 +297,8 @@ async def entrypoint(ctx: JobContext) -> None:
             "Do not use bullet points, numbered lists, or markdown — speak in plain natural sentences.",
         ) + _LANGUAGE_LOCK
         first_message = ""
-        llm_provider = settings.llm_provider
-        llm_model = settings.llm_model_gemini if llm_provider == "gemini" else settings.llm_model_openai
+        llm_provider = settings.call_llm_provider
+        llm_model = _default_call_llm_model(llm_provider)
         voice_provider_override = ""
         voice_id_override = ""
 

@@ -2,11 +2,11 @@
 
 For each customer tenant we expect five secrets in the vault, named:
 
-    {tenant_id}-db-url
-    {tenant_id}-blob-account-url
-    {tenant_id}-blob-account-name
-    {tenant_id}-blob-account-key
-    {tenant_id}-blob-container
+    tenant-{tenant_id}-db-url
+    tenant-{tenant_id}-blob-account-url
+    tenant-{tenant_id}-blob-account-name
+    tenant-{tenant_id}-blob-account-key
+    tenant-{tenant_id}-blob-container
 
 `tenant_id` must match ``^[a-zA-Z0-9-]{1,63}$`` because Key Vault secret names
 allow only alphanumerics + hyphens, capped at 127 chars per name (we leave
@@ -35,6 +35,11 @@ from .config import settings
 # carve out an explicit allow-rule for it.
 TENANT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9-]{1,63}$")
 LOCAL_TENANT_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,63}$")
+
+# Every per-tenant secret is namespaced under this prefix in Key Vault so
+# the same vault can be shared with non-tenant operator secrets without
+# collision risk. Full secret name: ``{_SECRET_PREFIX}{tenant_id}-{key}``.
+_SECRET_PREFIX = "tenant-"
 
 _SECRET_KEYS: tuple[str, ...] = (
     "db-url",
@@ -160,7 +165,10 @@ class KeyVaultClient:
             client = self._ensure_client()
             try:
                 values = await asyncio.gather(
-                    *(client.get_secret(f"{tenant_id}-{key}") for key in _SECRET_KEYS)
+                    *(
+                        client.get_secret(f"{_SECRET_PREFIX}{tenant_id}-{key}")
+                        for key in _SECRET_KEYS
+                    )
                 )
             except Exception as exc:
                 raise TenantSecretsNotFoundError(
@@ -184,7 +192,7 @@ class KeyVaultClient:
             ):
                 if not getattr(secrets, field_name):
                     raise TenantSecretsNotFoundError(
-                        f"secret {tenant_id}-{field_name.replace('_', '-')} is empty"
+                        f"secret {_SECRET_PREFIX}{tenant_id}-{field_name.replace('_', '-')} is empty"
                     )
 
             ttl = max(1, settings.tenant_secret_ttl_seconds)
@@ -206,7 +214,9 @@ class KeyVaultClient:
         }
         await asyncio.gather(
             *(
-                client.set_secret(f"{secrets.tenant_id}-{key}", value)
+                client.set_secret(
+                    f"{_SECRET_PREFIX}{secrets.tenant_id}-{key}", value
+                )
                 for key, value in values.items()
             )
         )

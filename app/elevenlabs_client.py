@@ -68,9 +68,21 @@ async def create_voice_design_previews(
     """Voice Design step 1: generate 1-3 preview voices from a text description.
 
     Requires paid tier. Returns list of {generated_voice_id, audio_base_64, ...}.
+
+    ElevenLabs caps ``voice_description`` at 1000 characters and 422s
+    anything longer. Builders upstream (see ``build_voice_design_brief``
+    in app.main) keep briefs well under that, but retries on stale DB
+    rows can still surface an over-long string — so we hard-truncate
+    here at the last clause boundary as defence in depth.
     """
     if not api_key:
         raise ElevenLabsError("ELEVENLABS_API_KEY is missing")
+
+    if len(voice_description) > 1000:
+        cut = voice_description.rfind(";", 0, 1000)
+        voice_description = (
+            voice_description[:cut] if cut > 0 else voice_description[:1000]
+        ).rstrip()
 
     payload = {
         "voice_description": voice_description,

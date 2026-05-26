@@ -12,6 +12,7 @@ import urllib.request
 
 import httpx
 from PIL import Image
+from app.ai_types import PERSONA_ANALYSIS_JSON_SCHEMA, PersonaAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -22,55 +23,62 @@ class GeminiError(RuntimeError):
     pass
 
 
-async def detect_gender_from_image(
+async def analyse_persona_from_image(
     api_key: str,
     image_bytes: bytes,
     *,
     model: str,
     mime_type: str = "image/png",
-) -> str:
+) -> PersonaAnalysis:
+    """Single Gemini vision call returning a :class:`PersonaAnalysis`.
+
+    Uses Gemini's **strict structured output** (``responseSchema`` +
+    ``responseMimeType: application/json``) — the model is constrained
+    at inference time to produce the :class:`PersonaAnalysis` shape.
+    Any error propagates so the caller can mark the persona as
+    ``failed``.
+    """
     if not api_key:
-        return "unknown"
+        raise GeminiError("GEMINI_API_KEY missing — cannot analyse persona.")
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
+    instruction = (
+        "You analyse portraits for an AI avatar product. Decide the "
+        "apparent gender presentation (male or female) and write a 2–4 "
+        "sentence voice-design brief that ElevenLabs Voice Design can "
+        "consume directly. Cover vocal register and pitch, speaking pace "
+        "and rhythm, tonal quality (warm/crisp/deep/breathy etc.), and "
+        "any accent or regional quality if evident. The brief must be "
+        "plain prose — no markdown, no bullet points, no labels."
+    )
     payload = {
         "contents": [
             {
                 "role": "user",
                 "parts": [
-                    {
-                        "text": (
-                            "You are a visual classifier for avatar customization. Examine the portrait "
-                            "and identify the apparent gender presentation of the adult subject. Reply "
-                            "with exactly one word — female, male, or unknown — and nothing else. "
-                            "Use unknown if the subject is ambiguous, not an adult, or not clearly visible."
-                        ),
-                    },
+                    {"text": instruction},
                     {"inline_data": {"mime_type": mime_type, "data": b64}},
                 ],
             }
         ],
         "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": 8,
+            "temperature": 0.2,
+            "maxOutputTokens": 700,
+            "responseMimeType": "application/json",
+            "responseSchema": PERSONA_ANALYSIS_JSON_SCHEMA,
             "thinkingConfig": {"thinkingBudget": 0},
         },
     }
     url = f"{GEMINI_BASE_URL}/models/{model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=45) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(url, headers=headers, json=payload)
     data = _parse_json(response)
     if response.status_code >= 400:
-        raise GeminiError(f"Gemini gender detection failed ({response.status_code}): {data}")
-
-    text = _extract_text(data).strip().lower()
-    if "female" in text:
-        return "female"
-    if "male" in text:
-        return "male"
-    return "unknown"
+        raise GeminiError(
+            f"Gemini persona analysis failed ({response.status_code}): {data}"
+        )
+    return PersonaAnalysis.model_validate_json(_extract_text(data))
 
 
 async def detect_gender_from_audio(
@@ -130,6 +138,46 @@ async def detect_gender_from_audio(
     if "male" in text:
         return "male"
     return "unknown"
+
+
+async def generate_short_text(
+    api_key: str,
+    *,
+    system_msg: str,
+    user_msg: str,
+    model: str,
+    max_tokens: int = 80,
+    temperature: float = 0.6,
+) -> str:
+    """Plain text-only Gemini call returning a short response.
+
+    Gemini doesn't have a dedicated "system" role; we fold the system
+    message into the user turn as a leading section, then ask for the
+    short response.
+    """
+    if not api_key:
+        raise GeminiError("GEMINI_API_KEY missing — cannot run short-text completion.")
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": system_msg + "\n\n" + user_msg}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    url = f"{GEMINI_BASE_URL}/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(url, headers=headers, json=payload)
+    data = _parse_json(response)
+    if response.status_code >= 400:
+        raise GeminiError(f"Gemini short-text failed ({response.status_code}): {data}")
+    return _extract_text(data)
 
 
 async def describe_voice_from_image(
