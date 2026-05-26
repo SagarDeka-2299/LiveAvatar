@@ -1170,6 +1170,21 @@ function initAssistantView(){
   const cp=$("clone-asst-prompt");if(cp)cp.value=asst.prompt||"";
   const cm=$("clone-asst-msg");if(cm)cm.value=asst.first_message||"";
   setStatus($("clone-asst-status"),"");
+
+  // Reset tab active states to default ca-call
+  const tabBar = document.querySelector('.tab-bar[data-group="ca"]');
+  if (tabBar) {
+    tabBar.querySelectorAll(".tab-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.tab === "ca-call");
+    });
+  }
+  const paneCall = $("ca-call"), paneClone = $("ca-clone");
+  if (paneCall) paneCall.hidden = false;
+  if (paneClone) paneClone.hidden = true;
+
+  const actCall = $("ca-call-actions"), actClone = $("ca-clone-actions");
+  if (actCall) actCall.hidden = false;
+  if (actClone) actClone.hidden = true;
 }
 
 /* ── Voice Design view ── */
@@ -1984,7 +1999,7 @@ document.addEventListener("click", e => {
   // assistant view tabs
   if (tabId === "ca-call" || tabId === "ca-clone") {
     $("ca-call-actions").hidden  = (tabId !== "ca-call");
-    $("ca-clone-actions").hidden = (tabId !== "ca-call");
+    $("ca-clone-actions").hidden = (tabId !== "ca-clone");
   }
   // voice design tabs
   if (tabId === "vd-design" || tabId === "vd-clone") {
