@@ -1485,14 +1485,16 @@ $("nav-generate-btn").addEventListener("click",async()=>{
   const customPrompt=$("nav-theme-input")?.value.trim()||"";
   const skipStyle=!!$("nav-skip-style")?.checked;
   const btn=$("nav-generate-btn");btn.disabled=true;
-  setStatus($("nav-status"),"Queued — generating in background…","success");
+  // Same preview flow whether or not styling is skipped — the backend
+  // honours skip_style by reusing the persona's source image instead of
+  // running the image model, so the preview is near-instant in that case.
+  setStatus($("nav-status"),skipStyle?"Queued — preparing preview…":"Queued — generating in background…","success");
   try{
     const fd=new FormData();
     fd.append("persona_id",p.id);fd.append("name",name);
     fd.append("preset_ids",JSON.stringify(skipStyle?[]:navPresets));
     fd.append("custom_prompt",skipStyle?"":customPrompt);
     fd.append("skip_style",skipStyle?"true":"false");
-    
     {const _r=await fetch(`/${TENANT_ID}/avatars/preview`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");}
     navPresets=[];navPresetCat="All";if(nameEl)nameEl.value="";
     const ti=$("nav-theme-input");if(ti)ti.value="";

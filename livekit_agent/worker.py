@@ -72,6 +72,7 @@ async def _idle_monitor(session: AgentSession, ctx: JobContext) -> None:
             if not warned and (now - last_activity) >= IDLE_WARN_SECONDS:
                 warned = True
                 warn_time = now
+                logger.warning("⏳ [Worker] User has been silent for %s seconds. Triggering passive user-idle check...", IDLE_WARN_SECONDS)
                 await session.generate_reply(
                     instructions=(
                         "The user has been silent for a while. "
@@ -82,6 +83,7 @@ async def _idle_monitor(session: AgentSession, ctx: JobContext) -> None:
                     )
                 )
             elif warned and (now - warn_time) >= IDLE_BYE_SECONDS:
+                logger.warning("⚠️ [Worker] User silent too long. Saying goodbye and gracefully disconnecting room...")
                 await session.generate_reply(
                     instructions=(
                         "The user has not responded. "
@@ -156,7 +158,7 @@ _SUPPORTED_TTS = {"elevenlabs", "openai", "google"}
 def _build_tts(voice_id_override: str = "", provider_override: str = ""):
     provider = (provider_override or settings.tts_provider).lower()
     if provider not in _SUPPORTED_TTS:
-        logger.warning("Stored TTS provider %r is not supported — falling back to %s", provider, settings.tts_provider)
+        logger.warning("⚠️ [Worker] Stored TTS provider %r is not supported — falling back to %s", provider, settings.tts_provider)
         provider = settings.tts_provider.lower()
         voice_id_override = ""  # stored voice_id is provider-specific; don't reuse
     voice_id = voice_id_override or settings.tts_voice_id
@@ -260,7 +262,7 @@ async def _load_assistant_from_job(
             )
             return tenant_id, asst_dict, persona_dict
     except Exception:
-        logger.exception("Failed to load assistant %s for tenant %s", aid, tenant_id)
+        logger.exception("❌ [Worker] Failed to load assistant %s for tenant %s", aid, tenant_id)
         return tenant_id, None, None
 
 
@@ -308,12 +310,19 @@ async def entrypoint(ctx: JobContext) -> None:
         voice_id_override = ""
 
     if not face_id:
+        logger.error("❌ [Worker] No face_id available (assistant row missing face_id and DEFAULT_SIMLI_FACE_ID unset)")
         raise RuntimeError("No face_id available (assistant row missing face_id and DEFAULT_SIMLI_FACE_ID unset)")
 
     logger.info(
-        "Starting agent | room=%s assistant=%s llm=%s:%s stt=%s tts=%s voice=%s face=%s",
+        "🚀 [Worker] Starting LiveKit Agent session...\n"
+        "   • Room: %s\n"
+        "   • Assistant: %s\n"
+        "   • LLM: %s (%s)\n"
+        "   • STT: %s\n"
+        "   • TTS: %s (Voice: %s)\n"
+        "   • Face ID: %s",
         ctx.room.name,
-        (assistant or {}).get("name"),
+        (assistant or {}).get("name") or "Default",
         llm_provider,
         llm_model,
         settings.stt_provider,
@@ -330,14 +339,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
     from livekit.plugins import simli
 
-    # Trinity selection is already signaled by faceId/emotionId in the
-    # plugin's SimliConfig.create_json(). The /compose/token API only
-    # honors: faceId, apiVersion, sessionAggregator, handleSilence,
-    # maxSessionLength, maxIdleTime, startFrame, audioInputFormat.
-    # Extra "syncAudio"/"isHighQuality"/"isTrinity" flags were no-ops.
-
     avatar = None
     for attempt in range(1, 4):
+        logger.info("🪄 [Worker] Attempting connection to Simli Avatar Session (attempt %d/3) using Face ID: %s...", attempt, face_id)
         avatar = simli.AvatarSession(
             simli_config=simli.SimliConfig(
                 api_key=settings.simli_api_key,
@@ -350,15 +354,17 @@ async def entrypoint(ctx: JobContext) -> None:
         await avatar.start(session, ctx.room)
         try:
             await avatar.wait_for_join(timeout=15)
+            logger.info("✅ [Worker] Simli Avatar Session successfully joined and connected!")
             break
         except asyncio.TimeoutError:
             if attempt < 3:
-                logger.warning("Simli avatar not connected (attempt %d/3), retrying…", attempt)
+                logger.warning("⚠️ [Worker] Simli avatar connection timed out (attempt %d/3). Retrying...", attempt)
                 continue
-            logger.error("Simli avatar failed to connect after 3 attempts, continuing voice-only")
+            logger.error("❌ [Worker] Simli avatar failed to connect after 3 attempts. Falling back to voice-only call.")
             avatar = None
 
     from livekit.agents.voice.room_io import RoomOptions
+    logger.info("⚡ [Worker] Starting core Agent Session loop for room %s...", ctx.room.name)
     await session.start(
         agent=Agent(instructions=instructions),
         room=ctx.room,
@@ -366,6 +372,7 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     if first_message:
+        logger.info("🎙️ [Worker] Speaking first greeting: '%s'", first_message)
         await session.say(first_message)
 
     asyncio.create_task(_idle_monitor(session, ctx))

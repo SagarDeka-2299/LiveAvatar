@@ -10,28 +10,11 @@ services:
       - .env
     environment:
       - LOCAL_DATA_DIR=/app/local_data
-      - SIMLI_TRANSPORT=livekit
+      - SIMLI_TRANSPORT=auto
     volumes:
       # Persist the local-tenant SQLite + blob files across container
       # restarts so test data survives a `docker compose down`.
       - lili_local_data:/app/local_data
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: lili-worker
-    command: ["uv", "run", "python", "livekit_agent/worker.py", "start"]
-    env_file:
-      - .env
-    environment:
-      - LOCAL_DATA_DIR=/app/local_data
-      - SIMLI_TRANSPORT=livekit
-    volumes:
-      - lili_local_data:/app/local_data
-    depends_on:
-      - api
     restart: unless-stopped
 
 volumes:

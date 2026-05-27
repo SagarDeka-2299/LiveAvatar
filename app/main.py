@@ -63,7 +63,15 @@ from app.tenancy import (
     tenant_ctx,
 )
 
-logger = logging.getLogger(__name__)
+# Configure root logging once, on import, so app-level ``logger.info`` calls
+# (avatar / voice / persona pipeline progress) actually reach the container
+# stdout. Without this the root logger defaults to WARNING and every INFO
+# line is silently dropped. Level is overridable via ``LOG_LEVEL``.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("lili")
 
 
 # ── App + lifespan ────────────────────────────────────────────────────────────
@@ -899,9 +907,11 @@ async def _refresh_avatar_status(ctx: TenantContext, avatar: AvatarRow) -> Avata
     if status in {"processing", "queued", "pending"}:
         avatar.status = "processing"
     elif status in {"failed", "error"}:
+        logger.error("❌ [Avatar %s] Simli face generation failed: %s", avatar.id, status_response)
         avatar.status = "failed"
         avatar.last_error = str(status_response)
     else:
+        logger.info("🎉 [Avatar %s] Simli face generation completed successfully! Face ID %s is now ready for use.", avatar.id, ready_face_id)
         avatar.status = "ready"
         avatar.face_id = ready_face_id
         avatar.last_error = None
@@ -917,14 +927,17 @@ async def _poll_avatar_until_ready(tenant_id: str, avatar_id: int) -> None:
             async with open_background_context(tenant_id) as ctx:
                 avatar = await repo.get_persona_avatar(ctx.session, avatar_id)
                 if avatar is None:
+                    logger.warning("⚠️ [Avatar %s] Polling stopped: Avatar not found in database", avatar_id)
                     return
                 if avatar.status == "cancelled":
+                    logger.warning("⚠️ [Avatar %s] Polling stopped: Avatar has been cancelled", avatar_id)
                     return
+                logger.info("⏳ [Avatar %s] Polling Simli face generation status for face_id %s...", avatar_id, avatar.face_id)
                 avatar = await _refresh_avatar_status(ctx, avatar)
                 if avatar.status != "processing":
                     return
-        except Exception:
-            # Transient failure — back off and retry.
+        except Exception as exc:
+            logger.warning("⏳ [Avatar %s] Transient poller failure (retrying in 7s): %s", avatar_id, exc)
             pass
         await asyncio.sleep(7)
 
@@ -1007,6 +1020,7 @@ async def create_persona(
             self.content_type = content_type
     _validate_image_upload(_Shim(upload_content_type), image_bytes)  # type: ignore[arg-type]
 
+    logger.info("📸 [Persona] Inserting persona entity into database with name '%s'...", name)
     async with open_background_context(tenant_id) as ctx:
         row = await repo.insert_persona_entity(
             ctx.session,
@@ -1017,6 +1031,7 @@ async def create_persona(
             stage="detecting_gender",
         )
         persona_id = row.id
+        logger.info("📸 [Persona %s] Uploading source image (size: %d bytes)...", persona_id, len(image_bytes))
         image_url = await _upload_image(
             ctx,
             f"personas/{persona_id}/source",
@@ -1026,7 +1041,9 @@ async def create_persona(
         await repo.update_persona_entity(
             ctx.session, persona_id, image_url=image_url
         )
+        logger.info("📸 [Persona %s] Source image successfully uploaded! URL: %s", persona_id, image_url)
 
+    logger.info("📸 [Persona %s] Launching background analysis task...", persona_id)
     asyncio.create_task(
         _process_new_persona(tenant_id, persona_id, image_bytes)
     )
@@ -1052,9 +1069,11 @@ async def _process_new_persona(
     violation) the persona flips to ``failed`` with the error message
     captured in ``last_error`` — callers can delete and re-create.
     """
+    logger.info("📸 [Persona %s] Start portrait analysis using %s provider...", persona_id, settings.gender_provider)
     try:
         analysis = await ai_router.analyse_persona(image_bytes)
     except Exception as exc:
+        logger.error("❌ [Persona %s] Portrait analysis failed: %s", persona_id, exc)
         async with open_background_context(tenant_id) as ctx:
             await repo.update_persona_entity(
                 ctx.session,
@@ -1076,6 +1095,7 @@ async def _process_new_persona(
             progress=100,
             last_error=None,
         )
+    logger.info("✅ [Persona %s] Portrait analysis succeeded! Gender determined: %s", persona_id, analysis.gender)
 
 
 @app.get("/{tenant_id}/personas/{persona_id}/status", response_model=S.StatusResponse)
@@ -1185,10 +1205,14 @@ async def delete_persona(
     """
     persona = await repo.get_persona_entity(ctx.session, persona_id)
     if persona is None:
+        logger.error("❌ [Persona %s] Deletion failed: Persona not found", persona_id)
         raise HTTPException(status_code=404, detail="Persona not found")
+    logger.info("📸 [Persona %s] Deleting persona '%s'...", persona_id, persona.name)
     if persona.image_url:
+        logger.info("📸 [Persona %s] Deleting source portrait blob: %s...", persona_id, persona.image_url)
         await _delete_blob_by_url(ctx, persona.image_url)
     deleted = await repo.delete_persona_entity(ctx.session, persona_id)
+    logger.info("✅ [Persona %s] Persona successfully deleted!", persona_id)
     return {"deleted": deleted}
 
 
@@ -1383,12 +1407,17 @@ async def _run_avatar_image_generation(
     try:
         prompt = "" if skip_style else build_avatar_edit_prompt(preset_ids, custom_prompt)
         if prompt:
+            logger.info(
+                "🎨 [Avatar %s] Starting avatar variant preview image generation using %s provider (%d presets)...",
+                avatar_id, settings.image_provider, len(preset_ids),
+            )
             edited_bytes = await ai_router.generate_avatar(
                 persona_image_bytes,
                 prompt_chain=[prompt],
                 filename=f"{name}.png",
             )
         else:
+            logger.info("🎨 [Avatar %s] Reusing base portrait directly (skip styling turned on).", avatar_id)
             edited_bytes = persona_image_bytes
 
         async with open_background_context(tenant_id) as ctx:
@@ -1402,7 +1431,9 @@ async def _run_avatar_image_generation(
                 status="not_saved",
                 last_error=None,
             )
+        logger.info("✅ [Avatar %s] Variant preview image generated successfully! Preview URL: %s", avatar_id, preview_url)
     except Exception as exc:
+        logger.error("❌ [Avatar %s] Variant preview image generation failed: %s", avatar_id, exc)
         async with open_background_context(tenant_id) as ctx:
             await repo.update_persona_avatar(
                 ctx.session, avatar_id, status="failed", last_error=str(exc)
@@ -1437,16 +1468,21 @@ async def save_avatar(
             draft.image_url if (draft and draft.image_url) else persona.image_url
         )
 
+    logger.info("💾 [Avatar %s] Starting save_avatar pipeline for '%s'...", draft_avatar_id or "new", name)
+    logger.info("📥 [Avatar %s] Fetching avatar image bytes from URL: %s...", draft_avatar_id or "new", source_image_url)
     image_bytes = await _fetch_url_bytes(source_image_url)
 
     try:
+        logger.info("📤 [Avatar %s] Uploading image (%d bytes) to Simli API...", draft_avatar_id or "new", len(image_bytes))
         upload_response = await upload_face_image(
             api_key=settings.simli_api_key,
             image_bytes=image_bytes,
             filename=f"{name}.png",
             face_name=name,
         )
+        logger.info("✅ [Avatar %s] Simli upload complete! Response: %s", draft_avatar_id or "new", upload_response)
     except SimliError as exc:
+        logger.error("❌ [Avatar %s] Simli image upload failed: %s", draft_avatar_id or "new", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     status = normalize_generation_status(upload_response)
@@ -1457,6 +1493,7 @@ async def save_avatar(
         face_id = extract_face_id(upload_response)
         avatar_status = "ready"
     if not face_id:
+        logger.error("❌ [Avatar %s] Simli did not return a usable avatar id: %s", draft_avatar_id or "new", upload_response)
         raise HTTPException(
             status_code=502,
             detail=f"Simli did not return a usable avatar id: {upload_response}",
@@ -1490,7 +1527,9 @@ async def save_avatar(
         assert row is not None
         model = _avatar_row_to_model(row)
 
+    logger.info("✅ [Avatar %s] Successfully uploaded to Simli! Face ID: %s (Status: %s)", model.id, face_id, avatar_status)
     if model.status == "processing":
+        logger.info("⏳ [Avatar %s] Face is processing on Simli. Starting background polling task...", model.id)
         asyncio.create_task(_poll_avatar_until_ready(tenant_id, model.id))
 
     return model
@@ -1534,18 +1573,24 @@ async def delete_avatar(
     we additionally clear their stale ``face_id`` string."""
     row = await repo.get_persona_avatar(ctx.session, avatar_id)
     if row is None:
+        logger.error("❌ [Avatar %s] Deletion failed: Avatar not found", avatar_id)
         raise HTTPException(status_code=404, detail="Avatar not found")
+    logger.info("🎨 [Avatar %s] Deleting avatar '%s' (Face ID: %s)...", avatar_id, row.name, row.face_id)
     if row.image_url:
+        logger.info("🎨 [Avatar %s] Deleting image blob: %s...", avatar_id, row.image_url)
         await _delete_blob_by_url(ctx, row.image_url)
     if row.face_id and settings.simli_api_key:
         try:
+            logger.info("🎨 [Avatar %s] Deleting face from Simli backend API...", avatar_id)
             await delete_face(settings.simli_api_key, row.face_id)
-        except SimliError:
+        except SimliError as exc:
+            logger.warning("⚠️ [Avatar %s] Failed to delete face from Simli backend (ignoring): %s", avatar_id, exc)
             pass
     # face_id on assistants is a free-form string (not an FK) — clear it
     # explicitly before the FK SET NULL nulls their avatar_id.
     await repo.clear_face_id_for_avatar(ctx.session, avatar_id)
     deleted = await repo.delete_persona_avatar(ctx.session, avatar_id)
+    logger.info("✅ [Avatar %s] Avatar successfully deleted!", avatar_id)
     return {"deleted": deleted}
 
 
@@ -1560,15 +1605,19 @@ async def retry_avatar(
     tenant_id = ctx.tenant_id
     row = await repo.get_persona_avatar(ctx.session, avatar_id)
     if row is None:
+        logger.error("❌ [Avatar %s] Retry failed: Avatar not found", avatar_id)
         raise HTTPException(status_code=404, detail="Avatar not found")
     if row.status not in {"failed", "cancelled"}:
+        logger.error("❌ [Avatar %s] Retry failed: Avatar is not in a retryable state (%s)", avatar_id, row.status)
         raise HTTPException(
             status_code=409, detail="Avatar is not in a retryable state"
         )
 
+    logger.info("🎨 [Avatar %s] Retrying avatar generation pipeline (Status: %s, Face ID: %s)...", avatar_id, row.status, row.face_id)
     if not row.face_id:
         persona = await repo.get_persona_entity(ctx.session, row.persona_id)
         if persona is None:
+            logger.error("❌ [Avatar %s] Retry failed: Persona %s not found", avatar_id, row.persona_id)
             raise HTTPException(status_code=404, detail="Persona not found")
         await repo.update_persona_avatar(
             ctx.session,
@@ -1579,7 +1628,9 @@ async def retry_avatar(
         )
         persona_image_url = persona.image_url
         name = row.name or f"avatar-{avatar_id}"
+        logger.info("🎨 [Avatar %s] Fetching base persona portrait bytes to re-generate avatar...", avatar_id)
         persona_image_bytes = await _fetch_url_bytes(persona_image_url)
+        logger.info("🎨 [Avatar %s] Launching background image generation task...", avatar_id)
         asyncio.create_task(
             _run_avatar_image_generation(
                 tenant_id=tenant_id,
@@ -1596,6 +1647,7 @@ async def retry_avatar(
     await repo.update_persona_avatar(
         ctx.session, avatar_id, status="processing", stage="queued", last_error=None
     )
+    logger.info("🎨 [Avatar %s] Avatar already has Face ID on Simli. Starting background polling task...", avatar_id)
     asyncio.create_task(_poll_avatar_until_ready(tenant_id, avatar_id))
     return {"status": "retrying"}
 
@@ -1705,16 +1757,20 @@ async def create_assistant(
     payload: S.AssistantCreate,
     ctx: TenantContext = Depends(tenant_ctx),
 ) -> S.Assistant:
+    logger.info("📦 [Assistant] Creating assistant '%s' (Persona: %s, Avatar: %s)...", payload.name, payload.persona_id, payload.avatar_id)
     persona = await repo.get_persona_entity(ctx.session, payload.persona_id)
     if persona is None:
+        logger.error("❌ [Assistant] Assistant creation failed: Persona %s not found", payload.persona_id)
         raise HTTPException(status_code=404, detail="Persona not found")
     avatar = await repo.get_persona_avatar(ctx.session, payload.avatar_id)
     if avatar is None or avatar.persona_id != payload.persona_id:
+        logger.error("❌ [Assistant] Assistant creation failed: Avatar %s not found for Persona %s", payload.avatar_id, payload.persona_id)
         raise HTTPException(
             status_code=404, detail="Avatar not found for persona"
         )
     avatar = await _refresh_avatar_status(ctx, avatar)
     if avatar.status != "ready":
+        logger.error("❌ [Assistant] Assistant creation failed: Avatar %s is still processing", payload.avatar_id)
         raise HTTPException(
             status_code=409, detail="Avatar is still processing"
         )
@@ -1727,6 +1783,7 @@ async def create_assistant(
     elif llm_provider == "azure_openai":
         llm_model = payload.llm_model or settings.call_llm_model_azure_openai
     else:
+        logger.error("❌ [Assistant] Assistant creation failed: Unsupported LLM provider %s", llm_provider)
         raise HTTPException(
             status_code=400, detail=f"Unsupported llm_provider: {llm_provider}"
         )
@@ -1763,6 +1820,7 @@ async def create_assistant(
         stage="ready",
         progress=100,
     )
+    logger.info("✅ [Assistant] Assistant '%s' created successfully! (ID: %s, Status: ready)", row.name, row.id)
     return _assistant_row_to_model(row)
 
 
@@ -1884,8 +1942,11 @@ async def delete_assistant(
 ) -> dict[str, int]:
     row = await repo.get_assistant(ctx.session, assistant_id)
     if row is None:
+        logger.error("❌ [Assistant %s] Deletion failed: Assistant not found", assistant_id)
         raise HTTPException(status_code=404, detail="Assistant not found")
+    logger.info("📦 [Assistant %s] Deleting assistant '%s'...", assistant_id, row.name)
     deleted = await repo.delete_assistant(ctx.session, assistant_id)
+    logger.info("✅ [Assistant %s] Assistant successfully deleted!", assistant_id)
     return {"deleted": deleted}
 
 
@@ -2006,14 +2067,17 @@ async def start_call(
 ) -> S.AssistantCallResponse:
     assistant = await repo.get_assistant(ctx.session, payload.assistant_id)
     if assistant is None:
+        logger.error("❌ [Call] Call initiation failed: Assistant %s not found", payload.assistant_id)
         raise HTTPException(status_code=404, detail="Assistant not found")
     if assistant.avatar_id is None:
+        logger.error("❌ [Call] Call initiation failed: Assistant %s has no avatar attached", payload.assistant_id)
         raise HTTPException(
             status_code=409,
             detail="Assistant has no avatar attached — re-attach an avatar first.",
         )
     avatar = await repo.get_persona_avatar(ctx.session, assistant.avatar_id)
     if avatar is None:
+        logger.error("❌ [Call] Call initiation failed: Avatar %s not found", assistant.avatar_id)
         raise HTTPException(status_code=404, detail="Avatar not found")
 
     # Try to attach a friendly voice name + preview by joining on the
@@ -2054,22 +2118,28 @@ async def start_call(
 
     # ── Simli Auto (no LiveKit) ──
     if settings.simli_transport == "auto":
+        logger.info("🚀 [Call] Starting auto-transport (non-LiveKit) call for Assistant %s ('%s') using Face ID %s...", assistant.id, assistant.name, avatar.face_id)
         if not settings.simli_api_key:
+            logger.error("❌ [Call] Auto-transport call failed: SIMLI_API_KEY is missing")
             raise HTTPException(status_code=500, detail="SIMLI_API_KEY is missing")
         if not avatar.face_id:
+            logger.error("❌ [Call] Auto-transport call failed: Avatar has no face_id")
             raise HTTPException(status_code=409, detail="Avatar has no face_id")
 
         auto_payload = _build_simli_auto_payload(assistant, avatar.face_id)
         try:
             result = await start_auto_session(settings.simli_api_key, auto_payload)
         except SimliError as exc:
+            logger.error("❌ [Call] Auto-transport call failed: %s", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         room_url = str(result.get("roomUrl") or "")
         session_id = str(result.get("sessionId") or "")
         if not room_url:
+            logger.error("❌ [Call] Auto-transport call failed: Simli Auto returned no roomUrl: %s", result)
             raise HTTPException(status_code=502, detail=f"Simli Auto returned no roomUrl: {result}")
 
+        logger.info("✅ [Call] Auto-transport call started successfully! Simli Room URL: %s, Session ID: %s", room_url, session_id)
         return S.AssistantCallResponse(
             transport="auto",
             simli_auto=S.CallSimliAuto(room_url=room_url, session_id=session_id),
@@ -2077,11 +2147,13 @@ async def start_call(
         )
 
     # ── LiveKit (default) ──
+    logger.info("🚀 [Call] Starting LiveKit call for Assistant %s ('%s')...", assistant.id, assistant.name)
     if not (
         settings.livekit_url
         and settings.livekit_api_key
         and settings.livekit_api_secret
     ):
+        logger.error("❌ [Call] LiveKit call failed: LiveKit credentials are missing")
         raise HTTPException(status_code=500, detail="LiveKit credentials are missing")
 
     room_name = f"assistant-{payload.assistant_id}-{uuid4().hex[:8]}"
@@ -2100,6 +2172,7 @@ async def start_call(
         room_config=room_config,
     )
 
+    logger.info("✅ [Call] LiveKit call token generated successfully! Room: %s, Identity: %s", room_name, identity)
     return S.AssistantCallResponse(
         transport="livekit",
         livekit=S.CallLivekit(
@@ -2292,6 +2365,7 @@ async def _run_standalone_voice_design(
             last_error=None,
         )
 
+    logger.info("🎙 [Voice Design %s] Starting AI voice design pipeline for voice '%s' (Gender: %s)...", voice_id, voice_name, gender)
     try:
         if len(description) < 20:
             raise RuntimeError(
@@ -2303,8 +2377,10 @@ async def _run_standalone_voice_design(
         el_voice_id = ""
         preview_bytes: bytes | None = None
         # Per-voice showcase line generated by the LLM from the description.
+        logger.info("🎙 [Voice Design %s] Calling LLM to generate custom voice showcase preview audition text...", voice_id)
         preview_text = await ai_router.generate_voice_preview_text(prompt_description)
         try:
+            logger.info("🎙 [Voice Design %s] Requesting ElevenLabs text-to-voice design previews...", voice_id)
             previews = await elevenlabs_client.create_voice_design_previews(
                 settings.elevenlabs_api_key,
                 voice_description=prompt_description,
@@ -2315,6 +2391,7 @@ async def _run_standalone_voice_design(
             if not gen_id:
                 raise RuntimeError(f"No generated_voice_id returned: {first}")
             preview_bytes = elevenlabs_client.decode_preview_audio(first)
+            logger.info("🎙 [Voice Design %s] ElevenLabs design previews fetched! Committing the best preview to a persistent voice...", voice_id)
             el_voice_id = await elevenlabs_client.create_voice_from_preview(
                 settings.elevenlabs_api_key,
                 name=voice_name or f"voice-{voice_id}",
@@ -2327,6 +2404,7 @@ async def _run_standalone_voice_design(
                 raise
             # Voice Design requires a higher ElevenLabs plan — fall back to a
             # default voice + TTS preview rendered with the same showcase line.
+            logger.warning("⚠️ [Voice Design %s] ElevenLabs tier doesn't support Voice Design. Falling back to default pre-made voice: %s", voice_id, settings.tts_voice_id or "Sarah")
             el_voice_id = settings.tts_voice_id or "EXAVITQu4vr4xnSDxMaL"
             preview_bytes = await _store_voice_preview(
                 settings.elevenlabs_api_key, el_voice_id, text=preview_text
@@ -2348,6 +2426,7 @@ async def _run_standalone_voice_design(
                 status="ready",
                 last_error=None,
             )
+            logger.info("✅ [Voice Design %s] Successfully designed voice! ElevenLabs Voice ID: %s (Status: ready)", voice_id, el_voice_id)
             # Propagate newly generated voice details to any persona and its assistants linked to this voice
             personas = await repo.list_persona_entities(ctx.session)
             for p in personas:
@@ -2375,6 +2454,7 @@ async def _run_standalone_voice_design(
                                 voice_model=settings.tts_model,
                             )
     except Exception as exc:
+        logger.error("❌ [Voice Design %s] Voice design process failed: %s", voice_id, exc)
         async with open_background_context(tenant_id) as ctx:
             await repo.update_voice(
                 ctx.session, voice_id, status="failed", last_error=str(exc)
@@ -2458,6 +2538,7 @@ async def _run_standalone_voice_clone(
     voice_name: str,
     fallback_gender: str = "unknown",
 ) -> None:
+    logger.info("🎙 [Voice Clone %s] Starting voice clone pipeline for voice '%s' using sample: %s...", voice_id, voice_name, sample_filename)
     try:
         if not settings.elevenlabs_api_key:
             raise RuntimeError("ELEVENLABS_API_KEY is missing.")
@@ -2469,6 +2550,7 @@ async def _run_standalone_voice_clone(
         # ElevenLabs's Instant Voice Cloning does not detect gender from the
         # audio. We infer it with Gemini and forward it as a label so the
         # upstream voice row in ElevenLabs is also tagged.
+        logger.info("🎙 [Voice Clone %s] Calling Gemini to analyze and detect gender from the audio sample...", voice_id)
         detected_gender = await ai_router.detect_gender_from_audio(
             audio_bytes, mime_type=sample_mime
         )
@@ -2476,6 +2558,7 @@ async def _run_standalone_voice_clone(
             detected_gender if detected_gender in {"male", "female"} else fallback_gender
         )
 
+        logger.info("🎙 [Voice Clone %s] Requesting ElevenLabs Instant Voice Cloning with final gender: %s...", voice_id, final_gender)
         el_voice_id = await elevenlabs_client.add_cloned_voice(
             settings.elevenlabs_api_key,
             name=voice_name or f"voice-{voice_id}",
@@ -2511,6 +2594,7 @@ async def _run_standalone_voice_clone(
                 status="ready",
                 last_error=None,
             )
+            logger.info("✅ [Voice Clone %s] Successfully cloned voice! ElevenLabs Voice ID: %s (Status: ready)", voice_id, el_voice_id)
             # Propagate newly cloned voice details to any persona and its assistants linked to this voice
             personas = await repo.list_persona_entities(ctx.session)
             for p in personas:
@@ -2538,6 +2622,7 @@ async def _run_standalone_voice_clone(
                                 voice_model=settings.tts_model,
                             )
     except Exception as exc:
+        logger.error("❌ [Voice Clone %s] Voice cloning process failed: %s", voice_id, exc)
         async with open_background_context(tenant_id) as ctx:
             await repo.update_voice(
                 ctx.session, voice_id, status="failed", last_error=str(exc)
@@ -2556,15 +2641,21 @@ async def suggest_voice_description(
 ) -> dict[str, str]:
     persona = await repo.get_persona_entity(ctx.session, payload.persona_id)
     if persona is None:
+        logger.error("❌ [Voice Suggestion] Suggest failed: Persona %s not found", payload.persona_id)
         raise HTTPException(status_code=404, detail="Persona not found")
     image_url = persona.image_url
+    logger.info("🎙 [Voice Suggestion] Requesting AI-suggested voice description for Persona %s (Hint: '%s')...", payload.persona_id, payload.user_hint)
     try:
+        logger.info("🎙 [Voice Suggestion] Downloading persona portrait bytes: %s...", image_url)
         image_bytes = await _fetch_url_bytes(image_url)
+        logger.info("🎙 [Voice Suggestion] Requesting voice analysis suggestion from vision LLM (%s)...", settings.gender_provider)
         description = await ai_router.describe_voice(
             image_bytes, user_prompt=payload.user_hint
         )
+        logger.info("✅ [Voice Suggestion] Voice description generated successfully!")
         return {"description": (description or "").strip()}
     except Exception as exc:
+        logger.error("❌ [Voice Suggestion] Suggestion failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -2664,12 +2755,14 @@ async def voice_from_library(
                 )
                 break
 
+    logger.info("🎙 [Voice] Creating voice from library entry using EL Voice ID: %s (Name: '%s', Gender: %s)...", payload.voice_id, payload.name, gender)
     existing = [
         v
         for v in await repo.list_voices(ctx.session)
         if v.voice_id == payload.voice_id and v.source == "premade"
     ]
     if existing:
+        logger.info("🎙 [Voice] Reusing existing voice in DB with ID: %s", existing[0].id)
         return _voice_row_to_model(existing[0])
     row = await repo.insert_voice(
         ctx.session,
@@ -2682,6 +2775,7 @@ async def voice_from_library(
         gender=gender,
         status="ready",
     )
+    logger.info("✅ [Voice %s] Premade library voice successfully imported and registered!", row.id)
     return _voice_row_to_model(row)
 
 
@@ -2747,26 +2841,33 @@ async def delete_voice(
     ``voice_ref_id`` has its voice fields cleared."""
     row = await repo.get_voice(ctx.session, voice_id)
     if row is None:
+        logger.error("❌ [Voice %s] Deletion failed: Voice not found", voice_id)
         raise HTTPException(status_code=404, detail="Voice not found")
 
+    logger.info("🎙 [Voice %s] Deleting voice '%s' (Source: %s, EL ID: %s)...", voice_id, row.name, row.source, row.voice_id)
     if row.sample_url:
+        logger.info("🎙 [Voice %s] Deleting voice sample audio blob: %s...", voice_id, row.sample_url)
         await _delete_blob_by_url(ctx, row.sample_url)
     if row.preview_url:
+        logger.info("🎙 [Voice %s] Deleting voice preview audio blob: %s...", voice_id, row.preview_url)
         await _delete_blob_by_url(ctx, row.preview_url)
 
     # External: ElevenLabs voice.
     if row.voice_id and settings.elevenlabs_api_key:
         try:
+            logger.info("🎙 [Voice %s] Deleting voice from ElevenLabs backend account...", voice_id)
             await elevenlabs_client.delete_voice(
                 settings.elevenlabs_api_key, row.voice_id
             )
-        except ElevenLabsError:
+        except ElevenLabsError as exc:
+            logger.warning("⚠️ [Voice %s] ElevenLabs deletion failed (ignoring): %s", voice_id, exc)
             pass
 
     # Clear voice fields on every persona that referenced this voice.
     await repo.clear_persona_voice_ref(ctx.session, voice_id)
 
     await repo.delete_voice(ctx.session, voice_id)
+    logger.info("✅ [Voice %s] Voice successfully deleted from DB and storage!", voice_id)
     return {"deleted": 1}
 
 
@@ -2778,22 +2879,28 @@ async def retry_voice(
     tenant_id = ctx.tenant_id
     row = await repo.get_voice(ctx.session, voice_id)
     if row is None:
+        logger.error("❌ [Voice %s] Retry failed: Voice not found", voice_id)
         raise HTTPException(status_code=404, detail="Voice not found")
     if row.status not in {"failed", "cancelled"}:
+        logger.error("❌ [Voice %s] Retry failed: Voice is not in a retryable state (%s)", voice_id, row.status)
         raise HTTPException(status_code=409, detail="Voice is not in a retryable state")
 
     source = row.source or "designed"
+    logger.info("🎙 [Voice %s] Retrying voice creation pipeline (Source: %s, Name: '%s')...", voice_id, source, row.name)
     if source == "cloned":
         if not row.sample_url:
+            logger.error("❌ [Voice %s] Retry failed: Original audio sample URL is missing", voice_id)
             raise HTTPException(
                 status_code=400,
                 detail="Original sample is not stored — please re-upload.",
             )
+        logger.info("🎙 [Voice %s] Fetching original sample bytes to retry clone...", voice_id)
         audio_bytes = await _fetch_url_bytes(row.sample_url)
         sample_ext = os.path.splitext(row.sample_url.split("?", 1)[0])[1].lower() or ".mp3"
         await repo.update_voice(
             ctx.session, voice_id, status="processing", last_error=None
         )
+        logger.info("🎙 [Voice %s] Launching background voice cloning task...", voice_id)
         asyncio.create_task(
             _run_standalone_voice_clone(
                 tenant_id=tenant_id,
@@ -2809,6 +2916,7 @@ async def retry_voice(
     else:
         description = row.description or ""
         if not description:
+            logger.error("❌ [Voice %s] Retry failed: Voice has no description text", voice_id)
             raise HTTPException(
                 status_code=400,
                 detail="No description stored — please recreate the voice.",
@@ -2821,6 +2929,7 @@ async def retry_voice(
         await repo.update_voice(
             ctx.session, voice_id, status="processing", last_error=None
         )
+        logger.info("🎙 [Voice %s] Launching background voice design task...", voice_id)
         asyncio.create_task(
             _run_standalone_voice_design(
                 tenant_id=tenant_id,
