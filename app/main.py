@@ -63,6 +63,8 @@ from app.tenancy import (
     tenant_ctx,
 )
 
+import sys
+
 # Configure root logging once, on import, so app-level ``logger.info`` calls
 # (avatar / voice / persona pipeline progress) actually reach the container
 # stdout. Without this the root logger defaults to WARNING and every INFO
@@ -72,6 +74,12 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("lili")
+logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+logger.handlers.clear()
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logger.addHandler(handler)
+logger.propagate = False
 
 
 # ── App + lifespan ────────────────────────────────────────────────────────────

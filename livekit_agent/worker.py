@@ -24,7 +24,12 @@ from app.tenancy import open_background_context  # noqa: E402
 AGENT_NAME = "lili-avatar-agent"
 
 logger = logging.getLogger("lili-avatar-agent")
-logging.basicConfig(level=logging.INFO)
+logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+logger.handlers.clear()
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logger.addHandler(handler)
+logger.propagate = False
 
 IDLE_WARN_SECONDS = 25   # silence after agent finishes speaking before "Are you still there?"
 IDLE_BYE_SECONDS  = 15   # extra silence before goodbye + disconnect
