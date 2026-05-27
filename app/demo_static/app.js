@@ -70,10 +70,14 @@ function _ensureTick(){
   })();
 }
 let cropper=null,sourceFile=null,sourceUrl="",croppedBlob=null,croppedUrl="";
-let pollTimer=null;
-// Short-burst follow-up timer used by refreshAll() to re-poll a little
-// sooner than the 3s startPolling tick when a background task is mid-flight.
-let studioTimer=null;
+// Element-level status pollers — one per in-flight entity. Attached on render
+// to any element not in a terminal state; each polls its resource's /status
+// route every 30s (which makes the backend re-check Simli on demand) and stops
+// once the element reaches a terminal state. Replaces the old global poller.
+const STATUS_POLL_MS=30000;
+const TERMINAL_STATUSES=["ready","failed","cancelled","not_saved"];
+const elementPollers={};                       // "resource:id" -> intervalId
+const inFlight=s=>!!s&&!TERMINAL_STATUSES.includes(s);
 let _pendingDelete=null;
 
 const $=id=>document.getElementById(id);
@@ -977,6 +981,61 @@ function updateActiveFilterSummaries(){
   }
 }
 
+/* ── Element-level status pollers ── */
+const _pollerKey=(resource,id)=>`${resource}:${id}`;
+function _entityArray(resource){
+  return resource==="personas"?studio
+    :resource==="avatars"?selectedPersonaAvatars
+    :resource==="voices"?voices
+    :resource==="assistants"?assistants:[];
+}
+async function _reloadResource(resource){
+  if(resource==="personas")return loadStudio();
+  if(resource==="avatars")return loadAvatars();
+  if(resource==="voices")return loadVoices();
+  if(resource==="assistants")return loadAssistants();
+}
+function startElementPoller(resource,id){
+  const key=_pollerKey(resource,id);
+  if(elementPollers[key])return;                 // already polling this element
+  elementPollers[key]=setInterval(()=>pollElementStatus(resource,id).catch(()=>{}),STATUS_POLL_MS);
+}
+function stopElementPoller(key){
+  if(elementPollers[key]){clearInterval(elementPollers[key]);delete elementPollers[key];}
+}
+// Hit one element's /status route. The backend re-checks Simli on demand here.
+// Only re-render when the status actually moves (incl. → terminal).
+async function pollElementStatus(resource,id){
+  const key=_pollerKey(resource,id);
+  let data;
+  try{
+    const r=await fetch(`/${TENANT_ID}/${resource}/${id}/status`);
+    if(r.status===404){stopElementPoller(key);await _reloadResource(resource);renderAll();return;}
+    if(!r.ok)return;                              // transient — retry next tick
+    data=await r.json();
+  }catch{return;}
+  const cur=_entityArray(resource).find(x=>String(x.id)===String(id));
+  if(!cur||cur.status!==data.status){
+    await _reloadResource(resource);             // pull fresh fields (image_url, face_id, counts…)
+    renderAll();                                 // re-renders + reconciles (stops this poller if now terminal)
+  }else if(!inFlight(data.status)){
+    stopElementPoller(key);
+  }
+}
+// Attach/detach pollers so they exactly match what's currently in-flight.
+// Called at the end of renderAll(), so it also runs on first paint ("on load").
+function reconcileElementPollers(){
+  const active=new Set();
+  const scan=(resource,arr)=>(arr||[]).forEach(x=>{
+    if(inFlight(x.status)){active.add(_pollerKey(resource,x.id));startElementPoller(resource,x.id);}
+  });
+  scan("personas",studio);
+  scan("avatars",selectedPersonaAvatars);
+  scan("voices",voices);
+  scan("assistants",assistants);
+  Object.keys(elementPollers).forEach(k=>{if(!active.has(k))stopElementPoller(k);});
+}
+
 function renderAll(){
   updateActiveFilterSummaries();
   populateFilterDropdowns();
@@ -984,6 +1043,7 @@ function renderAll(){
   renderLeftAvatars();
   renderLeftVoices();
   renderLeftContacts();
+  reconcileElementPollers();
 }
 
 /* ── Center views ── */
@@ -1318,9 +1378,9 @@ $("vd-clone-submit-btn")?.addEventListener("click",async()=>{
 $("persona-upload-zone").addEventListener("click",()=>$("persona-image-input").click());
 $("persona-upload-zone").addEventListener("dragover",e=>{e.preventDefault();$("persona-upload-zone").classList.add("drag-over");});
 $("persona-upload-zone").addEventListener("dragleave",()=>$("persona-upload-zone").classList.remove("drag-over"));
-$("persona-upload-zone").addEventListener("drop",e=>{e.preventDefault();$("persona-upload-zone").classList.remove("drag-over");const f=e.dataTransfer.files[0];if(f){sourceFile=f;showPersonaPreview(f);}});
+$("persona-upload-zone").addEventListener("drop",e=>{e.preventDefault();$("persona-upload-zone").classList.remove("drag-over");const f=e.dataTransfer.files[0];if(f)openCropper(f);});
 $("pick-persona-image-btn").addEventListener("click",e=>{e.stopPropagation();$("persona-image-input").click();});
-$("persona-image-input").addEventListener("change",()=>{const[f]=$("persona-image-input").files||[];if(f){sourceFile=f;showPersonaPreview(f);}});
+$("persona-image-input").addEventListener("change",()=>{const[f]=$("persona-image-input").files||[];if(f)openCropper(f);});
 $("edit-crop-btn").addEventListener("click",()=>{if(sourceFile)openCropper(sourceFile);});
 $("cancel-crop-btn").addEventListener("click",closeCropper);
 $("confirm-crop-btn").addEventListener("click",async()=>{
@@ -1332,7 +1392,7 @@ $("crop-zoom-out").addEventListener("click",()=>cropper?.zoom(-0.1));
 $("create-persona-btn").addEventListener("click",async()=>{
   const name=($("persona-name-input")?.value||$("persona-name-pre-input")?.value||"").trim();
   if(!name)return setStatus($("persona-status"),"Enter a name.","error");
-  if(!croppedBlob)return setStatus($("persona-status"),"Choose an image first.","error");
+  if(!croppedBlob)return setStatus($("persona-status"),"Crop an image first.","error");
   $("create-persona-btn").disabled=true;setStatus($("persona-status"),"Uploading…");
   try{
     const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.png");
@@ -1883,13 +1943,10 @@ $("hangup-call-btn").addEventListener("click",hangup);$("floating-hangup-btn").a
 
 /* ── WS + Data ── */
 // The pure API has no WebSocket; background-task progress is exposed via
-// per-resource /status endpoints. For the demo we keep it simple and just
-// re-fetch everything every 3 seconds. A production front-end would poll
-// only the resources it's actively waiting on (see README for the
-// per-resource polling recipe).
-function startPolling(){
-  // no need of continuous http polling
-}
+// per-resource /status endpoints. We poll ONLY the resources actively in
+// flight: reconcileElementPollers()/pollElementStatus() (above) attach a 30s
+// poller to each non-terminal element and stop it on completion. No global
+// re-fetch loop.
 // GET /presets/avatar and /presets/voice — no tenant context (catalogue is global).
 async function loadPresets(){
   try {
@@ -1977,8 +2034,8 @@ async function refreshAll(){
   renderAll();
   // Re-init persona voice slot if persona edit is visible (without overriding current draft selection)
   if(!$("cv-persona")?.hidden){const p=getPersona();if(p)setupPvVoiceDropSlot(p, false);}
-  const need=studio.some(p=>p.status&&p.status!=="ready")||selectedPersonaAvatars.some(a=>a.status==="processing"||a.status==="generating")||assistants.some(a=>a.status&&a.status!=="ready")||voices.some(v=>v.status==="processing");
-  clearTimeout(studioTimer);if(need)studioTimer=setTimeout(()=>refreshAll().catch(()=>{}),6000);
+  // No global poller: renderAll() above reconciles per-element pollers, which
+  // poll each in-flight resource's /status route every 30s and stop on completion.
 }
 
 /* ── Tab-action visibility ── */
@@ -2014,8 +2071,7 @@ window.addEventListener("DOMContentLoaded",async()=>{
   setCallMode("hidden");
   initFilters();
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=(v!=="cv-welcome");});
-  startPolling();
   try{await Promise.all([loadPresets(),loadStudio(),loadAssistants(),loadVoices(),loadAllAvatars()]);}catch(e){console.error("Initial load error:",e);}
-  renderAll();
+  renderAll();  // also attaches element-level pollers to anything in-flight on load
   loadLibraryVoices().then(()=>renderLeftVoices()).catch(()=>{});
 });

@@ -32,6 +32,33 @@ def _prepare_vision_image(image_bytes: bytes) -> tuple[bytes, str]:
         return image_bytes, "image/png"
 
 
+def fit_to_169(image_bytes: bytes, width: int = 1024, height: int = 576) -> bytes:
+    """Center-crop/scale an image to an exact ``width``×``height`` (default
+    1024×576, 16:9) so a generated avatar matches the persona cropper's shape.
+
+    Cover fit: scales to fill the frame and crops the overflow (no letterbox
+    bars), mirroring the front-end cropper's ``getCroppedCanvas``. Returns a
+    PNG; falls back to the original bytes if PIL can't process the image.
+    """
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        if img.mode not in {"RGB", "RGBA", "L"}:
+            img = img.convert("RGB")
+        src_w, src_h = img.size
+        if not src_w or not src_h:
+            return image_bytes
+        scale = max(width / src_w, height / src_h)
+        resized = img.resize((round(src_w * scale), round(src_h * scale)), Image.LANCZOS)
+        left = (resized.width - width) // 2
+        top = (resized.height - height) // 2
+        cropped = resized.crop((left, top, left + width, top + height))
+        out = BytesIO()
+        cropped.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return image_bytes
+
+
 async def analyse_persona(
     image_bytes: bytes, *, mime_type: str = "image/png"
 ) -> PersonaAnalysis:

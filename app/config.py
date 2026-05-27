@@ -60,6 +60,13 @@ class Settings:
     tts_voice_id: str = os.getenv("TTS_VOICE_ID", "")
 
     # ── Simli avatar defaults ──
+    # Face *generation* endpoint. "trinity" -> /faces/trinity (GS faces; requires
+    # a Simli plan with GS-face quota). Anything else -> /faces/legacy. Default
+    # legacy because GS-face creation is plan-gated (403 "max GS Faces").
+    simli_face_model: str = os.getenv("SIMLI_FACE_MODEL", "legacy").lower()
+    # Live call/render model. "trinity" -> keep Simli emotion (Trinity) faceId
+    # behaviour; anything else -> bare faceId (legacy, no emotion suffix).
+    simli_call_model: str = os.getenv("SIMLI_CALL_MODEL", "trinity").lower()
     default_simli_face_id: str = os.getenv("DEFAULT_SIMLI_FACE_ID", "")
     default_simli_voice_provider: str = os.getenv("DEFAULT_SIMLI_VOICE_PROVIDER", "elevenlabs")
     default_simli_voice_model: str = os.getenv("DEFAULT_SIMLI_VOICE_MODEL", "eleven_flash_v2_5")

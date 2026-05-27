@@ -683,6 +683,17 @@ async def _fetch_url_bytes(url: str) -> bytes:
     """HTTP-GET a SAS URL (or any URL) and return the bytes."""
     if not url:
         raise HTTPException(status_code=404, detail="Asset URL is empty")
+    if "/local-blob/" in url:
+        try:
+            from app.local_storage import LocalBlobStore
+            key = url.split("/local-blob/", 1)[1].split("?", 1)[0]
+            store = LocalBlobStore(tenant_id=settings.local_tenant_id)
+            data, _ = store.read_local(key)
+            return data
+        except Exception as exc:
+            logger.error("Failed to read local blob directly: %s", exc)
+            pass
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.get(url)
         if resp.status_code >= 400:
@@ -903,7 +914,7 @@ async def _refresh_avatar_status(ctx: TenantContext, avatar: AvatarRow) -> Avata
         return avatar
     try:
         status_response = await get_face_generation_status(
-            settings.simli_api_key, avatar.face_id
+            settings.simli_api_key, avatar.face_id, face_model=settings.simli_face_model
         )
     except SimliError as exc:
         avatar.last_error = str(exc)
@@ -928,26 +939,11 @@ async def _refresh_avatar_status(ctx: TenantContext, avatar: AvatarRow) -> Avata
     return avatar
 
 
-async def _poll_avatar_until_ready(tenant_id: str, avatar_id: int) -> None:
-    """Background poller: hits Simli every 7s until the face generation finishes."""
-    while True:
-        try:
-            async with open_background_context(tenant_id) as ctx:
-                avatar = await repo.get_persona_avatar(ctx.session, avatar_id)
-                if avatar is None:
-                    logger.warning("⚠️ [Avatar %s] Polling stopped: Avatar not found in database", avatar_id)
-                    return
-                if avatar.status == "cancelled":
-                    logger.warning("⚠️ [Avatar %s] Polling stopped: Avatar has been cancelled", avatar_id)
-                    return
-                logger.info("⏳ [Avatar %s] Polling Simli face generation status for face_id %s...", avatar_id, avatar.face_id)
-                avatar = await _refresh_avatar_status(ctx, avatar)
-                if avatar.status != "processing":
-                    return
-        except Exception as exc:
-            logger.warning("⏳ [Avatar %s] Transient poller failure (retrying in 7s): %s", avatar_id, exc)
-            pass
-        await asyncio.sleep(7)
+# No background poller. Avatar readiness is resolved on-demand by
+# ``_refresh_avatar_status`` (above), which is called whenever the
+# ``GET /{tenant}/avatars/{id}/status`` route or a list endpoint is hit. The
+# front end attaches a 30s poller to each in-flight avatar and stops it once
+# Simli reports the face ready/failed.
 
 
 # ── Personas ──────────────────────────────────────────────────────────────────
@@ -1369,35 +1365,66 @@ async def avatar_preview(
             if skip_style
             else (build_avatar_edit_prompt(parsed_preset_ids, custom_prompt) or theme_prompt)
         )
-        avatar = await repo.insert_persona_avatar(
-            ctx.session,
-            persona_id=persona_id,
-            name=name,
-            decoration="" if skip_style else theme_prompt,
-            theme_prompt=full_prompt,
-            preset_ids=json.dumps(parsed_preset_ids),
-            face_id="",
-            image_url=persona.image_url,
-            status="generating",
-            stage="image_generation",
-            last_error=None,
-        )
-        avatar_id = avatar.id
-        persona_image_url = persona.image_url
 
-    persona_image_bytes = await _fetch_url_bytes(persona_image_url)
-    asyncio.create_task(
-        _run_avatar_image_generation(
-            tenant_id=tenant_id,
-            avatar_id=avatar_id,
-            persona_id=persona_id,
-            persona_image_bytes=persona_image_bytes,
-            preset_ids=parsed_preset_ids,
-            custom_prompt=effective_custom_prompt,
-            name=name,
-            skip_style=skip_style,
-        )
-    )
+        if skip_style:
+            logger.info("🎨 [Avatar Preview] Skip styling selected. Copying base portrait synchronously...")
+            persona_image_bytes = await _fetch_url_bytes(persona.image_url)
+            avatar = await repo.insert_persona_avatar(
+                ctx.session,
+                persona_id=persona_id,
+                name=name,
+                decoration="",
+                theme_prompt="",
+                preset_ids="[]",
+                face_id="",
+                image_url=persona.image_url,
+                status="generating",
+                stage="image_generation",
+                last_error=None,
+            )
+            preview_url = await _upload_image(
+                ctx, f"avatars/{avatar.id}/preview", persona_image_bytes
+            )
+            await repo.update_persona_avatar(
+                ctx.session,
+                avatar.id,
+                image_url=preview_url,
+                status="not_saved",
+                last_error=None,
+            )
+            logger.info("✅ [Avatar %s] Variant preview image copied synchronously! Preview URL: %s", avatar.id, preview_url)
+            avatar_id = avatar.id
+        else:
+            avatar = await repo.insert_persona_avatar(
+                ctx.session,
+                persona_id=persona_id,
+                name=name,
+                decoration="" if skip_style else theme_prompt,
+                theme_prompt=full_prompt,
+                preset_ids=json.dumps(parsed_preset_ids),
+                face_id="",
+                image_url=persona.image_url,
+                status="generating",
+                stage="image_generation",
+                last_error=None,
+            )
+            avatar_id = avatar.id
+            persona_image_url = persona.image_url
+
+            persona_image_bytes = await _fetch_url_bytes(persona_image_url)
+            asyncio.create_task(
+                _run_avatar_image_generation(
+                    tenant_id=tenant_id,
+                    avatar_id=avatar_id,
+                    persona_id=persona_id,
+                    persona_image_bytes=persona_image_bytes,
+                    preset_ids=parsed_preset_ids,
+                    custom_prompt=effective_custom_prompt,
+                    name=name,
+                    skip_style=skip_style,
+                )
+            )
+
     return {"avatar_id": avatar_id}
 
 
@@ -1427,6 +1454,11 @@ async def _run_avatar_image_generation(
         else:
             logger.info("🎨 [Avatar %s] Reusing base portrait directly (skip styling turned on).", avatar_id)
             edited_bytes = persona_image_bytes
+
+        # Force the preview to the same 16:9 shape the persona cropper produces
+        # (1024×576), so the styled image — and the Simli avatar / live call
+        # rendered from it — match the cropper framing exactly.
+        edited_bytes = ai_router.fit_to_169(edited_bytes)
 
         async with open_background_context(tenant_id) as ctx:
             preview_url = await _upload_image(
@@ -1487,6 +1519,7 @@ async def save_avatar(
             image_bytes=image_bytes,
             filename=f"{name}.png",
             face_name=name,
+            face_model=settings.simli_face_model,
         )
         logger.info("✅ [Avatar %s] Simli upload complete! Response: %s", draft_avatar_id or "new", upload_response)
     except SimliError as exc:
@@ -1537,8 +1570,7 @@ async def save_avatar(
 
     logger.info("✅ [Avatar %s] Successfully uploaded to Simli! Face ID: %s (Status: %s)", model.id, face_id, avatar_status)
     if model.status == "processing":
-        logger.info("⏳ [Avatar %s] Face is processing on Simli. Starting background polling task...", model.id)
-        asyncio.create_task(_poll_avatar_until_ready(tenant_id, model.id))
+        logger.info("⏳ [Avatar %s] Face is processing on Simli; the front end will poll /status to resolve readiness.", model.id)
 
     return model
 
@@ -1585,8 +1617,11 @@ async def delete_avatar(
         raise HTTPException(status_code=404, detail="Avatar not found")
     logger.info("🎨 [Avatar %s] Deleting avatar '%s' (Face ID: %s)...", avatar_id, row.name, row.face_id)
     if row.image_url:
-        logger.info("🎨 [Avatar %s] Deleting image blob: %s...", avatar_id, row.image_url)
-        await _delete_blob_by_url(ctx, row.image_url)
+        if "/avatars/" in row.image_url:
+            logger.info("🎨 [Avatar %s] Deleting image blob: %s...", avatar_id, row.image_url)
+            await _delete_blob_by_url(ctx, row.image_url)
+        else:
+            logger.info("🎨 [Avatar %s] Image %s belongs to persona — skipping deletion to preserve source portrait.", avatar_id, row.image_url)
     if row.face_id and settings.simli_api_key:
         try:
             logger.info("🎨 [Avatar %s] Deleting face from Simli backend API...", avatar_id)
@@ -1655,8 +1690,7 @@ async def retry_avatar(
     await repo.update_persona_avatar(
         ctx.session, avatar_id, status="processing", stage="queued", last_error=None
     )
-    logger.info("🎨 [Avatar %s] Avatar already has Face ID on Simli. Starting background polling task...", avatar_id)
-    asyncio.create_task(_poll_avatar_until_ready(tenant_id, avatar_id))
+    logger.info("🎨 [Avatar %s] Avatar marked processing; the front end will poll /status to resolve readiness.", avatar_id)
     return {"status": "retrying"}
 
 

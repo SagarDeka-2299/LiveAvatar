@@ -37,6 +37,8 @@ credentials live in Key Vault and are not env vars.
 | `SIMLI_API_KEY` | Simli avatar API key |
 | `SIMLI_TRANSPORT` | Call transport: `livekit` (default) or `auto`. When `auto`, skips LiveKit and uses Simli Auto sessions (Daily WebRTC rooms). |
 | `SIMLI_AZURE_PROXY_URL` | Public reverse proxy URL (e.g. ngrok tunnel) used to route Simli Auto sessions to Azure OpenAI |
+| `SIMLI_FACE_MODEL` | Face-creation endpoint: `legacy` (default, `/faces/legacy`) or `trinity` (`/faces/trinity`, GS faces — requires a Simli plan with GS-face quota, else 403 "max GS Faces"). |
+| `SIMLI_CALL_MODEL` | Live call/render model: `trinity` (default, Simli emotion faceId) or `legacy` (bare faceId). |
 | `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | AI provider keys |
 | `GENDER_PROVIDER` ∈ `openai` / `gemini` / `azure_openai`; per-provider model env vars (`GENDER_MODEL_GEMINI`, `GENDER_MODEL_OPENAI`, `GENDER_MODEL_AZURE_OPENAI`) | Vision gender classifier |
 | `IMAGE_PROVIDER` ∈ `openai` / `gemini` / `azure_openai`; `IMAGE_MODEL_GEMINI`, `IMAGE_MODEL_OPENAI` (Azure uses `AZURE_IMAGE_DEPLOYMENT`) | Avatar image editor |

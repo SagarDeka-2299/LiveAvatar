@@ -347,15 +347,23 @@ async def entrypoint(ctx: JobContext) -> None:
     avatar = None
     for attempt in range(1, 4):
         logger.info("🪄 [Worker] Attempting connection to Simli Avatar Session (attempt %d/3) using Face ID: %s...", attempt, face_id)
-        avatar = simli.AvatarSession(
-            simli_config=simli.SimliConfig(
-                api_key=settings.simli_api_key,
-                face_id=face_id,
-                # Must exceed IDLE_WARN_SECONDS + IDLE_BYE_SECONDS (25+15=40s) so
-                # Simli's own idle timeout never fires before our graceful disconnect.
-                max_idle_time=90,
-            )
+        simli_config = simli.SimliConfig(
+            api_key=settings.simli_api_key,
+            face_id=face_id,
+            # Must exceed IDLE_WARN_SECONDS + IDLE_BYE_SECONDS (25+15=40s) so
+            # Simli's own idle timeout never fires before our graceful disconnect.
+            max_idle_time=90,
         )
+        if settings.simli_call_model != "trinity":
+            # Legacy render: strip the Trinity emotion suffix the plugin appends to
+            # faceId ("{face_id}/{emotion_id}") — legacy faces take a bare id.
+            _orig_create_json = simli_config.create_json
+            def _legacy_create_json(_orig=_orig_create_json, _fid=face_id):
+                data = _orig()
+                data["faceId"] = _fid
+                return data
+            simli_config.create_json = _legacy_create_json
+        avatar = simli.AvatarSession(simli_config=simli_config)
         await avatar.start(session, ctx.room)
         try:
             await avatar.wait_for_join(timeout=15)
