@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from io import BytesIO
+from PIL import Image
 from app.ai_types import PersonaAnalysis
 from app.config import settings
 from app import azure_openai_client, gemini_client, openai_client
@@ -7,6 +9,27 @@ from app import azure_openai_client, gemini_client, openai_client
 
 class AIProviderError(RuntimeError):
     pass
+
+
+def _prepare_vision_image(image_bytes: bytes) -> tuple[bytes, str]:
+    """Ensure the image is a standard, moderately sized JPEG (max 1024x1024)
+    so it fits safely within Vision API request payload limits, avoiding
+    TCP disconnects and timeouts.
+    """
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        # Downscale if larger than 1024x1024
+        img.thumbnail((1024, 1024))
+        # Convert to RGB if needed (JPEG doesn't support RGBA)
+        if img.mode not in {"RGB", "L"}:
+            img = img.convert("RGB")
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=85, optimize=True)
+        compressed = out.getvalue()
+        return compressed, "image/jpeg"
+    except Exception:
+        # Fallback to original if PIL fails
+        return image_bytes, "image/png"
 
 
 async def analyse_persona(
@@ -21,6 +44,7 @@ async def analyse_persona(
     exception propagates so the caller (the persona create background
     task) can flip the persona row to ``status="failed"``.
     """
+    image_bytes, mime_type = _prepare_vision_image(image_bytes)
     provider = settings.gender_provider
     if provider == "gemini":
         return await gemini_client.analyse_persona_from_image(
@@ -172,6 +196,7 @@ async def describe_voice(
     supplies a specific style hint. The two-field combined analysis used at
     persona creation lives in :func:`analyse_persona`.
     """
+    image_bytes, mime_type = _prepare_vision_image(image_bytes)
     provider = settings.gender_provider
     if provider == "gemini":
         if not settings.gemini_api_key:
