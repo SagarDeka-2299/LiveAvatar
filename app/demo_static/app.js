@@ -1318,9 +1318,9 @@ $("vd-clone-submit-btn")?.addEventListener("click",async()=>{
 $("persona-upload-zone").addEventListener("click",()=>$("persona-image-input").click());
 $("persona-upload-zone").addEventListener("dragover",e=>{e.preventDefault();$("persona-upload-zone").classList.add("drag-over");});
 $("persona-upload-zone").addEventListener("dragleave",()=>$("persona-upload-zone").classList.remove("drag-over"));
-$("persona-upload-zone").addEventListener("drop",e=>{e.preventDefault();$("persona-upload-zone").classList.remove("drag-over");const f=e.dataTransfer.files[0];if(f)openCropper(f);});
+$("persona-upload-zone").addEventListener("drop",e=>{e.preventDefault();$("persona-upload-zone").classList.remove("drag-over");const f=e.dataTransfer.files[0];if(f){sourceFile=f;showPersonaPreview(f);}});
 $("pick-persona-image-btn").addEventListener("click",e=>{e.stopPropagation();$("persona-image-input").click();});
-$("persona-image-input").addEventListener("change",()=>{const[f]=$("persona-image-input").files||[];if(f)openCropper(f);});
+$("persona-image-input").addEventListener("change",()=>{const[f]=$("persona-image-input").files||[];if(f){sourceFile=f;showPersonaPreview(f);}});
 $("edit-crop-btn").addEventListener("click",()=>{if(sourceFile)openCropper(sourceFile);});
 $("cancel-crop-btn").addEventListener("click",closeCropper);
 $("confirm-crop-btn").addEventListener("click",async()=>{
@@ -1332,7 +1332,7 @@ $("crop-zoom-out").addEventListener("click",()=>cropper?.zoom(-0.1));
 $("create-persona-btn").addEventListener("click",async()=>{
   const name=($("persona-name-input")?.value||$("persona-name-pre-input")?.value||"").trim();
   if(!name)return setStatus($("persona-status"),"Enter a name.","error");
-  if(!croppedBlob)return setStatus($("persona-status"),"Crop an image first.","error");
+  if(!croppedBlob)return setStatus($("persona-status"),"Choose an image first.","error");
   $("create-persona-btn").disabled=true;setStatus($("persona-status"),"Uploading…");
   try{
     const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.png");
@@ -1888,8 +1888,7 @@ $("hangup-call-btn").addEventListener("click",hangup);$("floating-hangup-btn").a
 // only the resources it's actively waiting on (see README for the
 // per-resource polling recipe).
 function startPolling(){
-  if(pollTimer)clearInterval(pollTimer);
-  pollTimer=setInterval(()=>{refreshAll().catch(()=>{});},3000);
+  // no need of continuous http polling
 }
 // GET /presets/avatar and /presets/voice — no tenant context (catalogue is global).
 async function loadPresets(){
