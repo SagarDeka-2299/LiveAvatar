@@ -2042,39 +2042,47 @@ def _build_simli_auto_payload(
             "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
         }
     elif llm_provider_lower == "azure_openai":
-        if settings.simli_azure_proxy_url:
-            deployment = assistant.llm_model or settings.call_llm_model_azure_openai or "gpt-4o"
+        if settings.azure_openai_endpoint and settings.azure_openai_api_key:
+            deployment = (
+                assistant.llm_model
+                or settings.call_llm_model_azure_openai
+                or settings.azure_openai_deployment
+                or "gpt-4o"
+            )
             llm_config = {
                 "model": deployment,
                 "provider": "User",
                 "apiKey": settings.azure_openai_api_key,
-                "baseURL": f"{settings.simli_azure_proxy_url.rstrip('/')}/azure-openai-proxy/{deployment}",
+                "baseURL": f"{settings.azure_openai_endpoint.rstrip('/')}/openai/v1",
             }
         else:
-            # Simli Auto has no native Azure OpenAI support due to custom header requirements
-            # (Azure requires `api-key` instead of `Authorization: Bearer`).
-            # Therefore, we automatically fall back to standard OpenAI or Google Gemini.
-            if settings.openai_api_key:
+            # Fall back to another OpenAI-compatible provider only when Azure
+            # credentials are incomplete.
+            import logging as _log
+            _log.getLogger("lili").warning(
+                "⚠️ [Call] Azure OpenAI endpoint/key is incomplete — falling back "
+                "to Gemini/OpenAI for Simli Auto LLM."
+            )
+            if settings.gemini_api_key:
+                llm_config = {
+                    "model": settings.call_llm_model_gemini or "gemini-1.5-flash",
+                    "provider": "User",
+                    "apiKey": settings.gemini_api_key,
+                    "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+                }
+            elif settings.openai_api_key:
                 llm_config = {
                     "model": "gpt-4o-mini",
                     "provider": "User",
                     "apiKey": settings.openai_api_key,
                     "baseURL": "https://api.openai.com/v1",
                 }
-            elif settings.gemini_api_key:
-                llm_config = {
-                    "model": "gemini-1.5-flash",
-                    "provider": "User",
-                    "apiKey": settings.gemini_api_key,
-                    "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
-                }
             else:
-                llm_config = {
-                    "model": settings.call_llm_model_openai,
-                    "provider": "User",
-                    "apiKey": settings.openai_api_key,
-                    "baseURL": "https://api.openai.com/v1",
-                }
+                raise RuntimeError(
+                    "CALL_LLM_PROVIDER=azure_openai but AZURE_OPENAI_ENDPOINT or "
+                    "AZURE_OPENAI_API_KEY is missing, and neither GEMINI_API_KEY "
+                    "nor OPENAI_API_KEY is available."
+                )
     else:
         llm_config = {
             "model": llm_model or settings.call_llm_model_openai,

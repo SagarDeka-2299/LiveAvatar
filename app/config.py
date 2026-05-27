@@ -79,7 +79,6 @@ class Settings:
     azure_openai_api_key: str = os.getenv("AZURE_OPENAI_API_KEY", "")
     azure_openai_api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
     azure_openai_deployment: str = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
-    simli_azure_proxy_url: str = os.getenv("SIMLI_AZURE_PROXY_URL", "")
 
     # gpt-image-2 resource: image edits / generation (avatar styling).
     azure_image_endpoint: str = os.getenv("AZURE_IMAGE_ENDPOINT", "")
