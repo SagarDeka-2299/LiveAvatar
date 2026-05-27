@@ -32,13 +32,15 @@ def _prepare_vision_image(image_bytes: bytes) -> tuple[bytes, str]:
         return image_bytes, "image/png"
 
 
-def fit_to_169(image_bytes: bytes, width: int = 1024, height: int = 576) -> bytes:
-    """Center-crop/scale an image to an exact ``width``×``height`` (default
-    1024×576, 16:9) so a generated avatar matches the persona cropper's shape.
+def pad_to_169(image_bytes: bytes, width: int = 1024, height: int = 576) -> bytes:
+    """Letterbox an image into an exact ``width``×``height`` (default 1024×576,
+    16:9) by scaling it to fit *within* the frame and padding with black bars.
 
-    Cover fit: scales to fill the frame and crops the overflow (no letterbox
-    bars), mirroring the front-end cropper's ``getCroppedCanvas``. Returns a
-    PNG; falls back to the original bytes if PIL can't process the image.
+    Unlike a cover-crop, this never cuts off any part of the image — a portrait
+    gets side bars, a landscape gets top/bottom bars. Used to normalise the image
+    sent to Simli's face endpoint so the face API always receives a fixed 16:9
+    frame regardless of how the AI model or the user's crop produced the preview.
+    Returns a PNG; falls back to the original bytes if PIL can't process the image.
     """
     try:
         img = Image.open(BytesIO(image_bytes))
@@ -47,16 +49,23 @@ def fit_to_169(image_bytes: bytes, width: int = 1024, height: int = 576) -> byte
         src_w, src_h = img.size
         if not src_w or not src_h:
             return image_bytes
-        scale = max(width / src_w, height / src_h)
-        resized = img.resize((round(src_w * scale), round(src_h * scale)), Image.LANCZOS)
-        left = (resized.width - width) // 2
-        top = (resized.height - height) // 2
-        cropped = resized.crop((left, top, left + width, top + height))
+        # Scale down to fit inside the target box (contain, not cover).
+        scale = min(width / src_w, height / src_h)
+        new_w = round(src_w * scale)
+        new_h = round(src_h * scale)
+        resized = img.resize((new_w, new_h), Image.LANCZOS)
+        # Paste onto a black canvas.
+        canvas = Image.new("RGB", (width, height), (0, 0, 0))
+        left = (width - new_w) // 2
+        top = (height - new_h) // 2
+        canvas.paste(resized, (left, top))
         out = BytesIO()
-        cropped.save(out, format="PNG")
+        canvas.save(out, format="PNG")
         return out.getvalue()
     except Exception:
         return image_bytes
+
+
 
 
 async def analyse_persona(
@@ -266,13 +275,19 @@ async def generate_avatar(
     prompt_chain: list[str],
     filename: str,
 ) -> bytes:
+    # Compress the source image before sending to any image-edit API.
+    # Large PNGs (e.g. the 1024×576 from the persona cropper) cause Azure /
+    # OpenAI to disconnect with "Server disconnected without sending a response"
+    # because the multipart payload exceeds the API's soft size limit.
+    compressed_bytes, _ = _prepare_vision_image(base_image_bytes)
+
     provider = settings.image_provider
     if provider == "gemini":
         if not settings.gemini_api_key:
             return base_image_bytes
         return await gemini_client.generate_avatar_variant(
             settings.gemini_api_key,
-            base_image_bytes,
+            compressed_bytes,
             prompt_chain=prompt_chain,
             filename=filename,
             model=settings.image_model_gemini,
@@ -282,7 +297,7 @@ async def generate_avatar(
             return base_image_bytes
         return await openai_client.generate_avatar_variant(
             settings.openai_api_key,
-            base_image_bytes,
+            compressed_bytes,
             prompt_chain=prompt_chain,
             filename=filename,
             model=settings.image_model_openai,
@@ -293,7 +308,7 @@ async def generate_avatar(
         return await azure_openai_client.generate_avatar_variant(
             settings.azure_image_endpoint,
             settings.azure_image_api_key,
-            base_image_bytes,
+            compressed_bytes,
             prompt_chain=prompt_chain,
             filename=filename,
             deployment=settings.azure_image_deployment,

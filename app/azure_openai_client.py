@@ -232,10 +232,16 @@ async def edit_image_with_prompt(
     prompt: str,
     deployment: str,
     api_version: str,
-    size: str = "1024x1024",
+    size: str = "1280x720",
     quality: str = "medium",
+    mime_type: str = "image/png",
 ) -> bytes:
-    """One-shot Azure gpt-image-2 edit. Returns the edited image bytes (PNG)."""
+    """One-shot Azure gpt-image-2 edit. Returns the edited image bytes (PNG).
+
+    Default size 1280x720 (HD 16:9) — the smallest exact 16:9 where both
+    dimensions are multiples of 16 and total pixels (921,600) clear Azure's
+    655,360-pixel minimum budget. 1024x576 = 589,824px fails that check.
+    """
     if not (endpoint and api_key):
         return image_bytes
 
@@ -246,7 +252,7 @@ async def edit_image_with_prompt(
         "output_format": "png",
         "n": 1,
     }
-    files = {"image": (filename, image_bytes, "image/png")}
+    files = {"image": (filename, image_bytes, mime_type)}
     headers = {"api-key": api_key}
 
     async with httpx.AsyncClient(timeout=180) as client:
@@ -290,6 +296,7 @@ async def generate_avatar_variant(
     filename: str,
     deployment: str,
     api_version: str,
+    mime_type: str = "image/jpeg",
 ) -> bytes:
     """Apply each prompt in ``prompt_chain`` to the image sequentially."""
     current = base_image_bytes
@@ -305,6 +312,7 @@ async def generate_avatar_variant(
             prompt=prompt,
             deployment=deployment,
             api_version=api_version,
+            mime_type=mime_type if idx == 1 else "image/png",
         )
     return current
 

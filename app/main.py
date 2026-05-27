@@ -1455,11 +1455,6 @@ async def _run_avatar_image_generation(
             logger.info("🎨 [Avatar %s] Reusing base portrait directly (skip styling turned on).", avatar_id)
             edited_bytes = persona_image_bytes
 
-        # Force the preview to the same 16:9 shape the persona cropper produces
-        # (1024×576), so the styled image — and the Simli avatar / live call
-        # rendered from it — match the cropper framing exactly.
-        edited_bytes = ai_router.fit_to_169(edited_bytes)
-
         async with open_background_context(tenant_id) as ctx:
             preview_url = await _upload_image(
                 ctx, f"avatars/{avatar_id}/preview", edited_bytes
@@ -2105,8 +2100,8 @@ def _build_simli_auto_payload(
         "language": (assistant.language or "en"),
         "llmConfig": llm_config,
         "createTranscript": False,
-        # Intentionally omitting "model" so Simli picks its current
-        # default lipsync engine — always rides the latest.
+        # Force Trinity lipsync engine for HD lip-sync quality.
+        "model": "trinity",
     }
 
 

@@ -1,6 +1,6 @@
 /* ── Constants ── */
 const PLACEHOLDER="/demo/avatar-placeholder.svg";
-const CROP_W=1024,CROP_H=576,CROP_RATIO=16/9;
+const CROP_W=1280,CROP_H=720,CROP_RATIO=16/9;
 
 let PRESETS=[];
 let VOICE_PRESETS=[];

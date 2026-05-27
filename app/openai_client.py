@@ -11,7 +11,7 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 DEFAULT_GENDER_MODEL = os.getenv("OPENAI_GENDER_MODEL", "gpt-4o-mini")
 DEFAULT_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 DEFAULT_IMAGE_QUALITY = os.getenv("OPENAI_IMAGE_QUALITY", "medium")
-DEFAULT_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1024x1536")
+DEFAULT_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1280x720")
 
 
 class OpenAIError(RuntimeError):
@@ -172,6 +172,7 @@ async def edit_image_with_prompt(
     filename: str,
     prompt: str,
     model: str | None = None,
+    mime_type: str = "image/png",
 ) -> bytes:
     if not api_key:
         return image_bytes
@@ -184,7 +185,7 @@ async def edit_image_with_prompt(
         "output_format": "png",
         "input_fidelity": "high",
     }
-    files = {"image": (filename, image_bytes, "image/png")}
+    files = {"image": (filename, image_bytes, mime_type)}
     headers = {"Authorization": f"Bearer {api_key}"}
 
     async with httpx.AsyncClient(timeout=180) as client:
@@ -218,6 +219,7 @@ async def generate_avatar_variant(
     prompt_chain: list[str],
     filename: str,
     model: str | None = None,
+    mime_type: str = "image/jpeg",
 ) -> bytes:
     current = base_image_bytes
     prompts = [prompt.strip() for prompt in prompt_chain if prompt.strip()]
@@ -231,6 +233,7 @@ async def generate_avatar_variant(
             filename=f"step-{idx}-{filename}",
             prompt=prompt,
             model=model,
+            mime_type=mime_type if idx == 1 else "image/png",
         )
     return current
 
