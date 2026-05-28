@@ -88,6 +88,8 @@ class VoiceEntity(BaseModel):
     voice_id: str = ""
     source: str = ""
     description: str = ""
+    preset_ids: list[str] = Field(default_factory=list)
+    user_prompt: str = ""
     sample_url: str = ""
     preview_url: str = ""
     persona_id: int | None = None
@@ -277,6 +279,11 @@ class AssistantCallCreate(BaseModel):
 class PersonaPatchRequest(BaseModel):
     name: str | None = None
     voice_ref_id: int | None = None
+
+
+class VoicePatchRequest(BaseModel):
+    # Rename-only for now. Restricted to custom voices (designed / cloned).
+    name: str | None = None
 
 
 class AssistantPatch(BaseModel):

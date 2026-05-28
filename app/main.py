@@ -773,9 +773,12 @@ def _voice_row_to_model(row: VoiceRow) -> S.VoiceEntity:
         voice_id=row.voice_id,
         source=row.source,
         description=row.description,
+        preset_ids=_parse_preset_ids(getattr(row, "preset_ids", "[]")),
+        user_prompt=getattr(row, "user_prompt", "") or "",
         sample_url=_local_blob_to_base64_url(row.sample_url),
         preview_url=_local_blob_to_base64_url(row.preview_url),
         persona_id=row.persona_id,
+        gender=row.gender,
         status=row.status,
         last_error=row.last_error,
         created_at=row.created_at,
@@ -1360,11 +1363,6 @@ async def avatar_preview(
             raise HTTPException(status_code=404, detail="Persona not found")
         parsed_preset_ids = [] if skip_style else _parse_preset_ids(preset_ids)
         effective_custom_prompt = "" if skip_style else custom_prompt
-        full_prompt = (
-            ""
-            if skip_style
-            else (build_avatar_edit_prompt(parsed_preset_ids, custom_prompt) or theme_prompt)
-        )
 
         if skip_style:
             logger.info("🎨 [Avatar Preview] Skip styling selected. Copying base portrait synchronously...")
@@ -1400,7 +1398,11 @@ async def avatar_preview(
                 persona_id=persona_id,
                 name=name,
                 decoration="" if skip_style else theme_prompt,
-                theme_prompt=full_prompt,
+                # Persist ONLY the user-entered free text — never the assembled
+                # preset/system prompt. This is what the clone/remix page reuses,
+                # so the user never sees text they didn't type. Presets are
+                # restored separately from ``preset_ids``.
+                theme_prompt=effective_custom_prompt,
                 preset_ids=json.dumps(parsed_preset_ids),
                 face_id="",
                 image_url=persona.image_url,
@@ -2290,13 +2292,18 @@ async def design_voice_standalone(
     voice_preset_ids: list[str] = Form(default_factory=list),
     persona_id: int | None = Form(default=None),
     include_persona_traits: bool = Form(default=False),
-    gender: str | None = Form(
-        default=None,
-        description="Optional gender directive: 'male' or 'female'. "
-        "Appended to the voice description so ElevenLabs biases the design.",
+    gender: str = Form(
+        ...,
+        description="Required gender directive: 'male' or 'female'. ElevenLabs "
+        "Voice Design has no gender parameter, so this is appended to the "
+        "voice description (and set as a label) to bias the design's register.",
     ),
     tenant_id: str = PathParam(..., min_length=1, max_length=63),
 ) -> S.VoiceEntity:
+    # Capture the raw user-typed prompt (and the chosen presets) before we fold
+    # them into the assembled brief, so Remix can restore the exact originals.
+    user_prompt = description.strip()
+    remix_preset_ids = list(voice_preset_ids)
     if voice_preset_ids:
         # Assembled brief replaces the description when none was supplied,
         # otherwise gets appended after the user's free-form text.
@@ -2307,11 +2314,11 @@ async def design_voice_standalone(
             else preset_brief
         )
 
-    requested_gender = _normalize_gender(gender) if gender else ""
-    if gender and requested_gender not in {"male", "female"}:
+    requested_gender = _normalize_gender(gender)
+    if requested_gender not in {"male", "female"}:
         raise HTTPException(
             status_code=400,
-            detail="gender must be 'male' or 'female' when supplied",
+            detail="gender is required and must be 'male' or 'female'",
         )
 
     persona_voice_description = ""
@@ -2347,6 +2354,8 @@ async def design_voice_standalone(
             name=name or "New Voice",
             source="designed",
             description=initial_description,
+            preset_ids=json.dumps(remix_preset_ids),
+            user_prompt=user_prompt,
             status="processing",
             persona_id=persona_id,
             gender=effective_gender,
@@ -2512,6 +2521,13 @@ async def _run_standalone_voice_design(
 async def clone_voice_standalone(
     voice_sample: UploadFile = File(...),
     name: str = Form(default=""),
+    gender: str = Form(
+        ...,
+        description="Required gender: 'male' or 'female'. Recorded as the "
+        "voice's gender metadata (and forwarded as an ElevenLabs label) so "
+        "cloned voices can be filtered by gender. ElevenLabs IVC does not "
+        "detect gender from audio, so we rely on this explicit input.",
+    ),
     persona_id: int | None = Form(default=None),
     tenant_id: str = PathParam(..., min_length=1, max_length=63),
 ) -> S.VoiceEntity:
@@ -2522,23 +2538,24 @@ async def clone_voice_standalone(
         raise HTTPException(
             status_code=400, detail="Voice sample is too large (max 20 MB)"
         )
+    requested_gender = _normalize_gender(gender)
+    if requested_gender not in {"male", "female"}:
+        raise HTTPException(
+            status_code=400,
+            detail="gender is required and must be 'male' or 'female'",
+        )
     mime = voice_sample.content_type or "audio/mpeg"
     filename = voice_sample.filename or f"sample-{uuid4().hex}.mp3"
     sample_ext = os.path.splitext(filename)[1].lower() or ".mp3"
 
     async with open_background_context(tenant_id) as ctx:
-        persona_gender = "unknown"
-        if persona_id is not None:
-            persona = await repo.get_persona_entity(ctx.session, persona_id)
-            if persona is not None:
-                persona_gender = persona.gender or "unknown"
         row = await repo.insert_voice(
             ctx.session,
             name=name or "Cloned Voice",
             source="cloned",
             status="processing",
             persona_id=persona_id,
-            gender=persona_gender,
+            gender=requested_gender,
         )
         voice_id = row.id
         if persona_id:
@@ -2566,7 +2583,7 @@ async def clone_voice_standalone(
             sample_mime=mime,
             sample_ext=sample_ext,
             voice_name=name,
-            fallback_gender=persona_gender,
+            gender=requested_gender,
         )
     )
     return snapshot
@@ -2581,7 +2598,7 @@ async def _run_standalone_voice_clone(
     sample_mime: str,
     sample_ext: str,
     voice_name: str,
-    fallback_gender: str = "unknown",
+    gender: str = "unknown",
 ) -> None:
     logger.info("🎙 [Voice Clone %s] Starting voice clone pipeline for voice '%s' using sample: %s...", voice_id, voice_name, sample_filename)
     try:
@@ -2593,17 +2610,12 @@ async def _run_standalone_voice_clone(
             )
 
         # ElevenLabs's Instant Voice Cloning does not detect gender from the
-        # audio. We infer it with Gemini and forward it as a label so the
-        # upstream voice row in ElevenLabs is also tagged.
-        logger.info("🎙 [Voice Clone %s] Calling Gemini to analyze and detect gender from the audio sample...", voice_id)
-        detected_gender = await ai_router.detect_gender_from_audio(
-            audio_bytes, mime_type=sample_mime
-        )
-        final_gender = (
-            detected_gender if detected_gender in {"male", "female"} else fallback_gender
-        )
+        # audio, so we use the gender the user supplied at upload time. It is
+        # recorded on the voice row and forwarded as an ElevenLabs label so the
+        # voice carries gender metadata and can be filtered.
+        final_gender = gender if gender in {"male", "female"} else "unknown"
 
-        logger.info("🎙 [Voice Clone %s] Requesting ElevenLabs Instant Voice Cloning with final gender: %s...", voice_id, final_gender)
+        logger.info("🎙 [Voice Clone %s] Requesting ElevenLabs Instant Voice Cloning with gender: %s...", voice_id, final_gender)
         el_voice_id = await elevenlabs_client.add_cloned_voice(
             settings.elevenlabs_api_key,
             name=voice_name or f"voice-{voice_id}",
@@ -2860,6 +2872,42 @@ async def get_voice_endpoint(
     return _voice_row_to_model(row)
 
 
+@app.patch("/{tenant_id}/voices/{voice_id}", response_model=S.VoiceEntity)
+async def patch_voice(
+    voice_id: int,
+    payload: S.VoicePatchRequest,
+    ctx: TenantContext = Depends(tenant_ctx),
+) -> S.VoiceEntity:
+    """Update a custom voice. Rename-only for now.
+
+    Restricted to custom voices created in this tenant (``designed`` /
+    ``cloned``). Premade / library / system voices are owned by ElevenLabs and
+    cannot be edited here.
+    """
+    row = await repo.get_voice(ctx.session, voice_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Voice not found")
+    if row.source not in {"designed", "cloned"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Only custom (designed or cloned) voices can be edited",
+        )
+
+    fields: dict[str, Any] = {}
+    if payload.name is not None:
+        new_name = payload.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="name must not be empty")
+        fields["name"] = new_name
+
+    if not fields:
+        return _voice_row_to_model(row)
+
+    updated = await repo.update_voice(ctx.session, voice_id, **fields)
+    logger.info("✏️ [Voice %s] Renamed to '%s'", voice_id, fields.get("name"))
+    return _voice_row_to_model(updated or row)
+
+
 @app.get("/{tenant_id}/voices/{voice_id}/status", response_model=S.StatusResponse)
 async def voice_status(
     voice_id: int,
@@ -2955,7 +3003,7 @@ async def retry_voice(
                 sample_mime="audio/mpeg",
                 sample_ext=sample_ext,
                 voice_name=row.name or f"voice-{voice_id}",
-                fallback_gender=row.gender or "unknown",
+                gender=row.gender or "unknown",
             )
         )
     else:

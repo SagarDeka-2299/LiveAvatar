@@ -15,11 +15,37 @@ request. A working reference front-end is mounted at `/demo`.
 
 ### Docker
 
+**Standalone (Simli Auto) — no compose, single container:**
+
 ```bash
 docker build -t lili-api .
-docker run --rm -p 8000:8000 --env-file .env lili-api
-# OpenAPI docs at http://localhost:8000/docs
+docker run -d --name lili-api -p 8000:8000 \
+  --env-file .env \
+  -v lili_data:/app/local_data \
+  lili-api
+# OpenAPI docs at http://localhost:8000/docs · health at /health · demo UI at /demo
 ```
+
+The image defaults to `SIMLI_TRANSPORT=auto`, where Simli hosts the entire
+STT/LLM/TTS pipeline in a Daily room — so **no companion worker is needed**;
+the one container is the whole backend. Just supply `SIMLI_API_KEY`, an
+`ELEVENLABS_API_KEY` (TTS), and one LLM provider's keys (`AZURE_OPENAI_*` /
+`GEMINI_API_KEY` / `OPENAI_API_KEY`) in `.env` — Simli's servers call these
+directly, so they must be valid and reachable. The named volume persists the
+`local_tenant` SQLite + blobs across `docker rm`. A `HEALTHCHECK` hitting
+`/health` is built in.
+
+**Compose (either transport):**
+
+```bash
+docker compose -f docker-compose.simli.yml up    # Simli Auto (api only)
+docker compose -f docker-compose.livekit.yml up  # LiveKit (api + agent worker)
+```
+
+> LiveKit mode (`SIMLI_TRANSPORT=livekit`) additionally requires the agent
+> worker (`livekit_agent/worker.py`), which `docker-compose.livekit.yml`
+> runs as a second service — so LiveKit is **not** standalone-deployable from
+> the single image alone.
 
 ### Environment variables
 

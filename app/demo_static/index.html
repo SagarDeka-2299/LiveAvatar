@@ -93,8 +93,14 @@
   <!-- ══ LEFT PANE ══ -->
   <aside class="left-pane" id="left-pane">
     <div class="pane-toolbar">
-      <button class="pane-ctrl" id="left-pane-max" title="Maximize">⤢</button>
       <button class="pane-ctrl" id="left-pane-close" title="Close (mobile)" style="display:none">✕</button>
+    </div>
+
+    <!-- Tenant selector — scopes all data in the UI to this tenant -->
+    <div class="tenant-bar" title="Tenant ID — all data shown is scoped to this tenant">
+      <label for="tenant-id-input">Tenant</label>
+      <input id="tenant-id-input" type="text" spellcheck="false" autocomplete="off" placeholder="local_tenant"/>
+      <button id="tenant-id-apply" type="button">Apply</button>
     </div>
 
     <!-- Voices section -->
@@ -107,7 +113,7 @@
       </div>
       <div class="section-body" id="voices-body">
         <div class="list-header-row">
-          <button type="button" class="filter-toggle-btn" data-popup="voices-filter-popup">⚙ Filter</button>
+          <button type="button" class="filter-toggle-btn" data-popup="voices-filter-popup" title="Filter" aria-label="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></button>
           <span class="active-filters-summary" id="voices-active-summary"></span>
         </div>
         <div id="voices-filter-popup" class="filter-popup" hidden>
@@ -161,7 +167,7 @@
       </div>
       <div class="section-body" id="personas-body">
         <div class="list-header-row">
-          <button type="button" class="filter-toggle-btn" data-popup="personas-filter-popup">⚙ Filter</button>
+          <button type="button" class="filter-toggle-btn" data-popup="personas-filter-popup" title="Filter" aria-label="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></button>
           <span class="active-filters-summary" id="personas-active-summary"></span>
         </div>
         <div id="personas-filter-popup" class="filter-popup" hidden>
@@ -224,7 +230,7 @@
       </div>
       <div class="section-body" id="avatars-body">
         <div class="list-header-row">
-          <button type="button" class="filter-toggle-btn" data-popup="avatars-filter-popup">⚙ Filter</button>
+          <button type="button" class="filter-toggle-btn" data-popup="avatars-filter-popup" title="Filter" aria-label="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></button>
           <span class="active-filters-summary" id="avatars-active-summary"></span>
         </div>
         <div id="avatars-filter-popup" class="filter-popup" hidden>
@@ -277,7 +283,7 @@
       </div>
       <div class="section-body" id="contacts-body">
         <div class="list-header-row">
-          <button type="button" class="filter-toggle-btn" data-popup="contacts-filter-popup">⚙ Filter</button>
+          <button type="button" class="filter-toggle-btn" data-popup="contacts-filter-popup" title="Filter" aria-label="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></button>
           <span class="active-filters-summary" id="contacts-active-summary"></span>
         </div>
         <div id="contacts-filter-popup" class="filter-popup" hidden>
@@ -343,7 +349,7 @@
         <div id="persona-preview-area" hidden>
           <div class="preview-area">
             <div class="preview-image-wrap">
-              <div id="persona-preview-thumb" class="preview-thumb portrait"></div>
+              <div id="persona-preview-thumb" class="preview-thumb square"></div>
               <button id="edit-crop-btn" type="button" class="btn-overlay">✎ Crop</button>
             </div>
             <div class="preview-meta">
@@ -514,6 +520,11 @@
         <p id="ca-call-status" class="status-msg"></p>
       </div>
       <div id="ca-clone" class="tab-pane cv-body" hidden>
+        <div class="field"><label>Avatar <span class="field-note">Prefilled from this assistant — clear it and drag another ready avatar to retarget</span></label>
+          <div id="clone-asst-avatar-slot" class="entity-drop-slot entity-drop-slot--big">
+            <span class="drop-hint">Drag a ready avatar here from the Avatars panel</span>
+          </div>
+        </div>
         <div class="field"><label for="clone-asst-name">New Name</label>
           <input id="clone-asst-name" type="text" maxlength="100"/></div>
         <div class="field"><label for="clone-asst-prompt">Instructions</label>
@@ -612,6 +623,13 @@
           <input id="vd-name" type="text" placeholder="e.g. Sophie's Voice" maxlength="100"/>
         </div>
         <div class="field">
+          <label>Gender <span class="field-note">Required — biases the designed voice's register</span></label>
+          <div id="vd-gender-seg" class="gender-seg" role="radiogroup" aria-label="Voice gender">
+            <span class="preset-chip" data-gender="female" role="radio" aria-checked="false" tabindex="0">♀ Female</span>
+            <span class="preset-chip" data-gender="male" role="radio" aria-checked="false" tabindex="0">♂ Male</span>
+          </div>
+        </div>
+        <div class="field">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500">
             <input type="checkbox" id="vd-include-persona" style="width:15px;height:15px;accent-color:var(--primary);flex-shrink:0;cursor:pointer"/>
             Include persona voice profile
@@ -641,6 +659,13 @@
         <div class="field">
           <label for="vd-clone-name">Voice Name</label>
           <input id="vd-clone-name" type="text" placeholder="e.g. My Cloned Voice" maxlength="100"/>
+        </div>
+        <div class="field">
+          <label>Gender <span class="field-note">Required — recorded as the voice's gender metadata</span></label>
+          <div id="vd-clone-gender-seg" class="gender-seg" role="radiogroup" aria-label="Voice gender">
+            <span class="preset-chip" data-gender="female" role="radio" aria-checked="false" tabindex="0">♀ Female</span>
+            <span class="preset-chip" data-gender="male" role="radio" aria-checked="false" tabindex="0">♂ Male</span>
+          </div>
         </div>
         <div class="field">
           <label for="vd-clone-sample">Voice Sample <span class="field-note">MP3 / WAV / M4A · 30 s–3 min · clean speech</span></label>
@@ -706,6 +731,8 @@
         </div>
       </div>
       <div class="cv-actions">
+        <button id="vv-rename-btn" type="button" class="btn btn-ghost" hidden>✎ Rename</button>
+        <button id="vv-remix-btn" type="button" class="btn btn-primary btn-glow" hidden><span class="btn-icon">✨</span> Remix</button>
         <button id="vv-delete-btn" type="button" class="btn btn-danger">🗑 Delete Voice</button>
       </div>
     </div>
@@ -746,7 +773,7 @@
 <section id="cropper-modal" class="modal" hidden>
   <div class="modal-backdrop"></div>
   <div class="modal-panel">
-    <div class="modal-head"><h3>Crop Photo</h3><p>16:9 landscape — scroll or use buttons to zoom, drag to reframe.</p></div>
+    <div class="modal-head"><h3>Crop Photo</h3><p>Square (1:1) — scroll or use buttons to zoom, drag to reframe.</p></div>
     <div class="modal-body"><img id="cropper-image" alt="Crop source"/></div>
     <div class="modal-actions">
       <button id="cancel-crop-btn" type="button" class="btn btn-ghost">Cancel</button>
@@ -761,21 +788,23 @@
 
 <!-- CALL SHELL -->
 <section id="call-shell" class="call-shell" hidden>
-  <div class="call-topbar">
-    <div><p class="call-label">LIVE CALL</p><h3 id="call-title">Assistant</h3></div>
-    <div style="display:flex;gap:8px">
-      <button id="minimize-call-btn" type="button" class="btn btn-ghost btn-sm">⤓ Min</button>
-      <button id="hangup-call-btn" type="button" class="btn btn-danger btn-sm">✕ Hang Up</button>
+  <div class="call-window">
+    <div class="call-topbar">
+      <div><p class="call-label">LIVE CALL</p><h3 id="call-title">Assistant</h3></div>
+      <div style="display:flex;gap:8px">
+        <button id="minimize-call-btn" type="button" class="btn btn-ghost btn-sm">⤓ Min</button>
+        <button id="hangup-call-btn" type="button" class="btn btn-danger btn-sm">✕ Hang Up</button>
+      </div>
     </div>
-  </div>
-  <div id="call-widget-host" class="call-widget-host">
-    <video id="call-video" autoplay playsinline style="width:100%;height:100%;object-fit:contain;background:#000;display:block"></video>
-    <!-- Avatar audio plays from a dedicated element next to the video, matching
-         Simli's official LivekitTransport reference. Keeping them separate but
-         sourced from the same WebRTC PeerConnection preserves RTCP-SR-based
-         AV sync at the browser layer. -->
-    <audio id="call-audio" autoplay playsinline></audio>
-    <div id="call-waiting" class="call-waiting">Connecting…</div>
+    <div id="call-widget-host" class="call-widget-host">
+      <video id="call-video" autoplay playsinline style="width:100%;height:100%;object-fit:contain;background:#000;display:block"></video>
+      <!-- Avatar audio plays from a dedicated element next to the video, matching
+           Simli's official LivekitTransport reference. Keeping them separate but
+           sourced from the same WebRTC PeerConnection preserves RTCP-SR-based
+           AV sync at the browser layer. -->
+      <audio id="call-audio" autoplay playsinline></audio>
+      <div id="call-waiting" class="call-waiting">Connecting…</div>
+    </div>
   </div>
 </section>
 

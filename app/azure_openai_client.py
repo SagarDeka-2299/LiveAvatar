@@ -232,15 +232,16 @@ async def edit_image_with_prompt(
     prompt: str,
     deployment: str,
     api_version: str,
-    size: str = "1280x720",
+    size: str = "1024x1024",
     quality: str = "medium",
     mime_type: str = "image/png",
 ) -> bytes:
     """One-shot Azure gpt-image-2 edit. Returns the edited image bytes (PNG).
 
-    Default size 1280x720 (HD 16:9) — the smallest exact 16:9 where both
-    dimensions are multiples of 16 and total pixels (921,600) clear Azure's
-    655,360-pixel minimum budget. 1024x576 = 589,824px fails that check.
+    Default size 1024x1024 (square) — Simli renders a square avatar frame
+    regardless of the source aspect ratio, so a 1:1 output avoids letterboxing
+    and wasted pixels. 1,048,576px clears Azure's 655,360-pixel minimum budget
+    and both dimensions are multiples of 16.
     """
     if not (endpoint and api_key):
         return image_bytes

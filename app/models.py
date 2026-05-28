@@ -129,6 +129,12 @@ class Voice(Base):
     voice_id: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     source: Mapped[str] = mapped_column(String(40), nullable=False, default="")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Remix metadata for designed voices: the presets the user picked and the
+    # raw free text they typed (never the assembled brief). ``description`` keeps
+    # the full assembled brief used for generation; these two let the Remix flow
+    # restore the exact original selections.
+    preset_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    user_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     sample_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     preview_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     persona_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

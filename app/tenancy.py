@@ -60,6 +60,47 @@ BlobLike = Union[BlobStore, LocalBlobStore]
 _ENGINE_CACHE_LIMIT = 64
 
 
+def _reconcile_sqlite_columns(conn) -> None:  # noqa: ANN001 (sync DBAPI conn)
+    """Add any ORM-model columns that are missing from existing SQLite tables.
+
+    ``Base.metadata.create_all`` never alters existing tables, so a DB created
+    before a model gained a column would be missing it. This runs ``ALTER TABLE
+    … ADD COLUMN`` for each absent column, deriving a safe DEFAULT for NOT NULL
+    columns. Idempotent and additive — never drops or rewrites anything.
+    """
+    from sqlalchemy import Integer, Numeric, inspect, text
+
+    insp = inspect(conn)
+    existing_tables = set(insp.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue  # create_all just made it — already matches the model
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have:
+                continue
+            ddl_type = col.type.compile(dialect=conn.dialect)
+            clause = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl_type}'
+            if not col.nullable:
+                # SQLite requires a DEFAULT when adding a NOT NULL column to a
+                # populated table. Prefer the model's declared default, else a
+                # type-appropriate zero value.
+                default_lit: str | None = None
+                sd = col.server_default
+                if sd is not None and getattr(sd, "arg", None) is not None:
+                    arg = sd.arg
+                    default_lit = getattr(arg, "text", None) or repr(str(arg))
+                elif col.default is not None and getattr(col.default, "is_scalar", False):
+                    val = col.default.arg
+                    default_lit = (
+                        str(val) if isinstance(val, (int, float)) else repr(str(val))
+                    )
+                if default_lit is None:
+                    default_lit = "0" if isinstance(col.type, (Integer, Numeric)) else "''"
+                clause += f" NOT NULL DEFAULT {default_lit}"
+            conn.exec_driver_sql(clause)
+
+
 @dataclass
 class TenantContext:
     tenant_id: str
@@ -153,6 +194,13 @@ class _TenantRegistry:
             if is_sqlite:
                 async with engine.begin() as conn:
                     await conn.run_sync(Base.metadata.create_all)
+                    # ``create_all`` only creates *missing tables*, never adds
+                    # columns to tables that already exist. For long-lived local
+                    # SQLite DBs we additively reconcile any model columns the
+                    # table is missing (the SQLite analogue of an Alembic
+                    # ``add_column`` migration), so schema changes don't require
+                    # a manual rebuild.
+                    await conn.run_sync(_reconcile_sqlite_columns)
 
             sessionmaker = async_sessionmaker(
                 engine, expire_on_commit=False, class_=AsyncSession

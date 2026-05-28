@@ -113,34 +113,31 @@ async def generate_voice_preview_text(description: str) -> str:
     naturally say.
 
     Used to populate the ``text`` field of ElevenLabs Voice Design and
-    TTS preview synthesis. Returns a single sentence (typically 5–15
-    words). Falls back to a generic line if the LLM is unavailable or
-    the description is empty.
+    TTS preview synthesis. Returns ONE short sentence — kept deliberately
+    brief so the preview audio is quick to listen to. Falls back to a
+    generic line if the LLM is unavailable or the description is empty.
 
-    NOTE: ElevenLabs voice design previews require the 'text' field to
-    be at least 100 characters long, so we ensure the prompt asks for
-    at least 100 characters, and pad/fallback to a longer string if
-    needed.
+    NOTE: ElevenLabs voice design previews require the 'text' field to be
+    at least 100 characters long, so we target ~100–130 characters (one
+    sentence) — short, but still clearing that floor.
     """
     fallback = (
-        "First, let me welcome you today. We are going to explore some truly "
-        "wonderful things together in this session, and I hope you find it "
-        "incredibly helpful and inspiring."
+        "Hi there — it's lovely to meet you, and I hope today brings you "
+        "something genuinely good and worth remembering."
     )
     desc = (description or "").strip()
     if not desc:
         return fallback
 
     system_msg = (
-        "You write a showcase paragraph that a voice actor would use to "
-        "audition for the voice described. The audition passage MUST be at "
-        "least 100 characters long (typically 20-30 words) to ensure a complete "
-        "audio preview. Tailor it to the voice's character — a warm therapist "
-        "would say something gentle, an energetic coach something motivational, "
-        "a deep narrator something cinematic. Return ONLY the passage, no "
+        "Write ONE short, natural sentence (about 100-130 characters) that a "
+        "voice with the description below would say as a quick audio preview. "
+        "Keep it to a single sentence — short and easy to listen to. Tailor it "
+        "to the voice's character — a warm therapist gentle, an energetic coach "
+        "motivational, a deep narrator cinematic. Return ONLY the sentence, no "
         "quotes, no preamble, no explanation."
     )
-    user_msg = f"Voice description:\n{desc}\n\nWrite the showcase audition passage (must be at least 100 characters):"
+    user_msg = f"Voice description:\n{desc}\n\nWrite the one-sentence preview line (100-130 characters):"
 
     provider = settings.gender_provider
     try:
@@ -183,13 +180,9 @@ async def generate_voice_preview_text(description: str) -> str:
     else:
         cleaned = fallback
 
-    # Ensure it is at least 100 characters
+    # ElevenLabs Voice Design needs ≥100 chars; nudge up only if we fell short.
     if len(cleaned) < 100:
-        padding = (
-            " This audition passage is designed to showcase the full range, "
-            "depth, and unique qualities of this voice across multiple sentences."
-        )
-        cleaned = f"{cleaned} {padding}"
+        cleaned = f"{cleaned} It's a real pleasure to share this short preview with you today."
         if len(cleaned) < 100:
             cleaned = fallback
 
@@ -276,7 +269,7 @@ async def generate_avatar(
     filename: str,
 ) -> bytes:
     # Compress the source image before sending to any image-edit API.
-    # Large PNGs (e.g. the 1024×576 from the persona cropper) cause Azure /
+    # Large PNGs (e.g. the 1024×1024 from the persona cropper) cause Azure /
     # OpenAI to disconnect with "Server disconnected without sending a response"
     # because the multipart payload exceeds the API's soft size limit.
     compressed_bytes, _ = _prepare_vision_image(base_image_bytes)

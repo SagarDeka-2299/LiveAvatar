@@ -1,6 +1,6 @@
 /* ── Constants ── */
 const PLACEHOLDER="/demo/avatar-placeholder.svg";
-const CROP_W=1280,CROP_H=720,CROP_RATIO=16/9;
+const CROP_W=1024,CROP_H=1024,CROP_RATIO=1;
 
 let PRESETS=[];
 let VOICE_PRESETS=[];
@@ -38,6 +38,8 @@ const ELEVENLABS_FALLBACK_VOICES = {
 // VOICE_PRESETS ids (at most one per partition; enforced in
 // renderPresetUI + revalidated server-side).
 let vdSelectedVoicePresetIds=[];
+let vdSelectedGender="";
+let vdCloneSelectedGender="";
 let vdVoiceCat="All";
 let pvPresets=[],pvPresetCat="All";
 let clonePresets=[],clonePresetCat="All";
@@ -45,6 +47,7 @@ let pvDroppedVoiceId=null;
 let vdDroppedPersonaId=null;
 let navDroppedPersonaId=null,navPresets=[],navPresetCat="All";
 let naDroppedAvatarId=null;
+let caCloneAvatar=null,caClonePersonaId=null;
 let vdCloneSampleFile=null;
 let libraryVoices=[];
 let _libExpanded=false;
@@ -95,7 +98,11 @@ function revoke(url){if(url)URL.revokeObjectURL(url);}
    for JSON routes, multipart form field for file uploads. Never on the
    URL. Filters and pagination (limit, offset) DO go on the URL as
    query parameters. See README for the full contract. */
-const TENANT_ID="local_tenant";
+const DEFAULT_TENANT_ID="local_tenant";
+// Mutable so the tenant can be switched at runtime from the header input.
+// All fetches read `TENANT_ID` at call time via template literals, so updating
+// this (plus a refresh) re-scopes the whole UI to another tenant.
+let TENANT_ID=localStorage.getItem("lili_tenant_id")||DEFAULT_TENANT_ID;
 
 /* ── Presets v2 ──
  * Each preset row: { id, category, partition, subcategory, gender, prompt }
@@ -243,7 +250,10 @@ async function fetchDetailedAvatar(id) {
 
 async function loadAvatars() {
   const status = appliedFilters.avatars.status;
-  const persona_id = appliedFilters.avatars.persona || selectedPersonaId || "";
+  // Only scope by persona when the persona FILTER is set. Without it we load
+  // every avatar across all personas (the default), rather than silently
+  // narrowing to whichever persona happens to be selected.
+  const persona_id = appliedFilters.avatars.persona || "";
   const assistant_id = appliedFilters.avatars.assistant;
   
   let url = `/${TENANT_ID}/avatars?`;
@@ -358,12 +368,11 @@ async function initVoiceView() {
     persEl.textContent = "Global preset (available to all)";
   }
   
-  $("vv-play-btn").onclick = () => {
-    if (detailed.id === "default") {
-      playDefaultVoicePreview();
-    } else {
-      playVoicePreview(detailed);
-    }
+  const vvPlay = $("vv-play-btn");
+  _setPlayBtnIcon(vvPlay, "play");
+  vvPlay.onclick = () => {
+    if (detailed.id === "default") toggleVoicePreview(vvPlay, resolveDefaultSrc);
+    else toggleVoicePreview(vvPlay, () => resolveVoiceSrc(detailed));
   };
   
   const delBtn = $("vv-delete-btn");
@@ -373,6 +382,58 @@ async function initVoiceView() {
       openDeleteModal("voice", detailed.id, detailed.name);
     };
   }
+
+  // Remix: only for custom designed voices (which carry presets / a user prompt
+  // to restore). Library, system, and cloned voices have nothing to remix.
+  const remixBtn = $("vv-remix-btn");
+  if (remixBtn) {
+    remixBtn.hidden = detailed.source !== "designed";
+    remixBtn.onclick = () => startVoiceRemix(detailed);
+  }
+
+  // Rename: any custom voice (designed or cloned), not library / system.
+  const renameBtn = $("vv-rename-btn");
+  if (renameBtn) {
+    const isCustom = detailed.source === "designed" || detailed.source === "cloned";
+    renameBtn.hidden = !isCustom;
+    renameBtn.onclick = () => renameVoice(detailed);
+  }
+}
+
+async function renameVoice(v) {
+  const next = (prompt("Rename voice", v.name || "") || "").trim();
+  if (!next || next === v.name) return;
+  try {
+    const r = await fetch(`/${TENANT_ID}/voices/${v.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: next }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "rename failed");
+    const updated = await r.json();
+    const idx = voices.findIndex(x => String(x.id) === String(v.id));
+    if (idx !== -1) voices[idx] = updated;
+    $("vv-name").textContent = updated.name;
+    await refreshAll();
+  } catch (e) {
+    alert("Rename failed: " + e.message);
+  }
+}
+
+// Open the Voice Design page pre-filled with a designed voice's exact original
+// presets, gender, and the raw free text the user typed.
+function startVoiceRemix(v) {
+  showView("voice-design");
+  // initVoiceDesignView() (run by showView) resets the form; populate after it.
+  const nameEl = $("vd-name"); if (nameEl) nameEl.value = (v.name || "Voice") + " Remix";
+  const descEl = $("vd-description"); if (descEl) descEl.value = v.user_prompt || "";
+  setVdGender(v.gender === "male" || v.gender === "female" ? v.gender : "");
+  vdSelectedVoicePresetIds.length = 0;
+  (v.preset_ids || []).forEach(id => vdSelectedVoicePresetIds.push(id));
+  vdVoiceCat = "All";
+  renderVdPresets();
+  refreshVdPresetIndicator();
+  document.querySelector('.tab-btn[data-tab="vd-design"]')?.click();
 }
 
 function syncPopupInputs(popupId) {
@@ -546,45 +607,73 @@ function initFilters() {
 }
 
 /* ── Voice playback ── */
-async function playVoicePreview(voice){
-  let detailedVoice = voice;
-  if (!voice.preview_url) {
-    try {
-      const r = await fetch(`/${TENANT_ID}/voices/${voice.id}`);
-      if (r.ok) {
-        detailedVoice = await r.json();
-        const idx = voices.findIndex(v => v.id === voice.id);
-        if (idx !== -1) {
-          voices[idx] = detailedVoice;
-        }
-      }
-    } catch (err) {
-      console.error("Failed to fetch detailed voice:", err);
-    }
-  }
-  if(!detailedVoice?.preview_url){alert("No preview audio available for this voice yet.");return;}
+/* ── Voice preview playback (shared, pausable) ──
+ * One <audio> element drives every play button (cards + detail). A button
+ * toggles play/pause for its own clip and shows ▶ / ⏸ / ↻ (replay) accordingly.
+ * Clicking the active clip pauses it midway; clicking again resumes; once it
+ * ends the button shows ↻ to replay from the start. */
+let _voiceAudioBtn=null;
+function _setPlayBtnIcon(btn,state){
+  if(!btn)return;
+  const icon=state==="pause"?"⏸":state==="replay"?"↻":"▶";
+  const word=state==="pause"?"Pause":state==="replay"?"Replay":"Play";
+  if(btn.classList.contains("voice-play-btn"))btn.textContent=icon;        // icon-only card button
+  else btn.textContent=`${icon} ${word} Preview`;                          // labelled detail button
+  btn.title=`${word} preview`;
+}
+function _initVoiceAudio(){
+  const el=$("voice-preview-audio");if(!el||el.dataset.bound)return;
+  el.dataset.bound="1";
+  el.addEventListener("play",()=>_setPlayBtnIcon(_voiceAudioBtn,"pause"));
+  el.addEventListener("pause",()=>{if(!el.ended)_setPlayBtnIcon(_voiceAudioBtn,"play");});
+  el.addEventListener("ended",()=>_setPlayBtnIcon(_voiceAudioBtn,"replay"));
+}
+// `srcProvider` returns the preview URL (sync value or a Promise) for this clip.
+async function toggleVoicePreview(btn,srcProvider){
+  _initVoiceAudio();
   const el=$("voice-preview-audio");if(!el)return;
-  el.src=detailedVoice.preview_url;
+  const sameBtn=(_voiceAudioBtn===btn);
+  // Pause the currently-playing clip.
+  if(sameBtn&&!el.paused){el.pause();return;}
+  // Resume a clip paused midway (not ended).
+  if(sameBtn&&el.paused&&!el.ended&&el.currentTime>0&&el.src){el.play().catch(()=>{});return;}
+  const src=await srcProvider();
+  if(!src){if(btn===$("vv-play-btn"))alert("No preview audio available for this voice yet.");return;}
+  if(_voiceAudioBtn&&_voiceAudioBtn!==btn)_setPlayBtnIcon(_voiceAudioBtn,"play");
+  _voiceAudioBtn=btn;
+  if(el.src!==src)el.src=src;
+  el.currentTime=0;                  // fresh clip or replay-from-start
   el.play().catch(()=>{});
 }
-async function playDefaultVoicePreview(){
-  const el=$("voice-preview-audio");if(!el)return;
+// Resolve (and cache) the preview URL for a custom voice.
+async function resolveVoiceSrc(voice){
+  if(voice?.preview_url)return voice.preview_url;
+  try{
+    const r=await fetch(`/${TENANT_ID}/voices/${voice.id}`);
+    if(r.ok){
+      const detailed=await r.json();
+      const idx=voices.findIndex(v=>v.id===voice.id);
+      if(idx!==-1)voices[idx]=detailed;
+      return detailed.preview_url||null;
+    }
+  }catch(err){console.error("Failed to fetch detailed voice:",err);}
+  return null;
+}
+async function resolveDefaultSrc(){
   const defaultVoiceId="EXAVITQu4vr4xnSDxMaL";
   const lib=libraryVoices.find(v=>v.voice_id===defaultVoiceId);
-  if(lib?.preview_url){
-    el.src=lib.preview_url;
-  }else{
-    // /voices/preview-default is POST with a JSON body now — can't be used
-    // directly as an <audio> src. Fetch the bytes, wrap in a blob URL.
-    try{
-      const _r=await fetch(`/${TENANT_ID}/voices/preview-default`);
-      if(!_r.ok)throw new Error("no default preview");
-      const blob=await _r.blob();
-      el.src=URL.createObjectURL(blob);
-    }catch{return;}
-  }
-  el.play().catch(()=>{});
+  if(lib?.preview_url)return lib.preview_url;
+  // /voices/preview-default is POST with a JSON body now — can't be used
+  // directly as an <audio> src. Fetch the bytes, wrap in a blob URL.
+  try{
+    const _r=await fetch(`/${TENANT_ID}/voices/preview-default`);
+    if(!_r.ok)throw new Error("no default preview");
+    return URL.createObjectURL(await _r.blob());
+  }catch{return null;}
 }
+// Back-compat wrappers (called from a few places); now route through the toggle.
+function playVoicePreview(voice,btn){return toggleVoicePreview(btn||_voiceAudioBtn||$("vv-play-btn"),()=>resolveVoiceSrc(voice));}
+function playDefaultVoicePreview(btn){return toggleVoicePreview(btn||_voiceAudioBtn||$("vv-play-btn"),resolveDefaultSrc);}
 
 /* ── Left pane renders ── */
 function renderLeftPersonas(){
@@ -629,8 +718,9 @@ function renderLeftPersonas(){
 
 function renderLeftAvatars(){
   const list=$("left-avatar-list"),hint=$("left-avatar-hint"),badge=$("avatar-count-badge");
-  list.innerHTML="";const persona=getPersona();
-  if(!persona){if(hint)hint.hidden=false;if(badge)badge.textContent="0";return;}
+  list.innerHTML="";
+  // Show all avatars across every persona by default; loadAvatars() narrows
+  // to a single persona only when the persona filter is set.
   if(hint)hint.hidden=true;
   const avatars=selectedPersonaAvatars.filter(a=>a.status!=="cancelled");
   if(badge)badge.textContent=avatars.filter(a=>a.status==="ready").length;
@@ -659,9 +749,11 @@ function renderLeftAvatars(){
       card.addEventListener("click",async()=>{selectedAvatarId=av.id;await fetchDetailedAvatar(av.id);showView("avatar");});
     }else if(av.status==="ready"){
       card.className="entity-card"+(av.id===selectedAvatarId?" active-purple":"");
+      const ownerName=studio.find(p=>p.id===av.persona_id)?.name;
+      const avMeta=[ownerName,av.decoration||"No style"].filter(Boolean).join(" · ");
       card.innerHTML=`<div class="entity-thumb sm" style="background-image:url('${(av.image_url||PLACEHOLDER).replace(/'/g,"\\'")}')"></div>
         <div class="entity-info"><div class="entity-name">${esc(av.name)}</div>
-        <div class="entity-meta">${esc(av.decoration||"No style")}</div></div>`;
+        <div class="entity-meta">${esc(avMeta)}</div></div>`;
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("avatar",av.id,av.name);};card.appendChild(del);
       card.addEventListener("click",async()=>{selectedAvatarId=av.id;await fetchDetailedAvatar(av.id);showView("avatar");});
@@ -704,6 +796,13 @@ function renderLeftAvatars(){
   });
 }
 
+// Small gender chip shown on every voice card (custom, default, library).
+function genderPill(g){
+  const v=(g||"").toLowerCase();
+  if(v==="male")return '<span class="gender-pill male">♂ Male</span>';
+  if(v==="female")return '<span class="gender-pill female">♀ Female</span>';
+  return '<span class="gender-pill unknown">Unspecified</span>';
+}
 function renderLeftVoices(){
   const list=$("left-voice-list"),badge=$("voice-count-badge");
   list.innerHTML="";
@@ -721,9 +820,9 @@ function renderLeftVoices(){
     const dc=document.createElement("div");dc.className="voice-card"+("default"===selectedVoiceId?" active":"");dc.style.cursor="pointer";
     const di=document.createElement("div");di.className="voice-thumb-icon";di.textContent="🔊";
     const info=document.createElement("div");info.className="voice-card-info";
-    info.innerHTML='<div class="voice-card-name">Default Voice</div><div class="voice-card-meta"><span class="voice-source-pill designed" style="background:rgba(100,100,255,.15);color:#b0b8ff;border-color:rgba(100,100,255,.35)">System</span>Built-in ElevenLabs voice</div>';
+    info.innerHTML='<div class="voice-card-name">Default Voice</div><div class="voice-card-meta"><span class="voice-source-pill designed" style="background:rgba(100,100,255,.15);color:#b0b8ff;border-color:rgba(100,100,255,.35)">System</span>'+genderPill("female")+'Built-in ElevenLabs voice</div>';
     const play=document.createElement("button");play.className="voice-play-btn";play.textContent="▶";play.title="Play preview";
-    play.onclick=e=>{e.stopPropagation();playDefaultVoicePreview();};
+    play.onclick=e=>{e.stopPropagation();toggleVoicePreview(play,resolveDefaultSrc);};
     dc.append(di,info,play);
     dc.addEventListener("click",()=>{selectedVoiceId="default";showView("voice");});
     dc.draggable=true;
@@ -785,9 +884,9 @@ function renderLeftVoices(){
       const pill=v.source==="cloned"?"cloned":"designed";
       const icon=document.createElement("div");icon.className="voice-thumb-icon";icon.textContent="🎙";
       const info=document.createElement("div");info.className="voice-card-info";
-      info.innerHTML=`<div class="voice-card-name">${esc(v.name)}</div><div class="voice-card-meta"><span class="voice-source-pill ${pill}">${pill==="cloned"?"Clone":"AI"}</span>${esc(v.description?.slice(0,40)||"ElevenLabs")}</div>`;
+      info.innerHTML=`<div class="voice-card-name">${esc(v.name)}</div><div class="voice-card-meta"><span class="voice-source-pill ${pill}">${pill==="cloned"?"Clone":"AI"}</span>${genderPill(v.gender)}${esc(v.description?.slice(0,40)||"ElevenLabs")}</div>`;
       const play=document.createElement("button");play.className="voice-play-btn";play.textContent="▶";play.title="Play preview";
-      play.onclick=e=>{e.stopPropagation();playVoicePreview(v);};
+      play.onclick=e=>{e.stopPropagation();toggleVoicePreview(play,()=>resolveVoiceSrc(v));};
       const del=document.createElement("button");del.className="entity-delete-btn";del.innerHTML="🗑";del.title="Delete";
       del.onclick=e=>{e.stopPropagation();openDeleteModal("voice",v.id,v.name);};
       card.append(icon,info,play,del);
@@ -822,11 +921,11 @@ function renderLeftVoices(){
           const lc=document.createElement("div");lc.className="voice-card"+(String(lv.voice_id)===String(selectedVoiceId)?" active":"");lc.style.cssText="margin-left:4px;opacity:.9";
           const li=document.createElement("div");li.className="voice-thumb-icon";li.style.cssText="font-size:14px";li.textContent="🎙";
           const linfo=document.createElement("div");linfo.className="voice-card-info";
-          const gender=lv.labels?.gender||"";const accent=lv.labels?.accent||"";
-          const meta=[gender,accent].filter(Boolean).join(" · ")||"ElevenLabs";
-          linfo.innerHTML=`<div class="voice-card-name">${esc(lv.name)}</div><div class="voice-card-meta"><span class="voice-source-pill designed" style="background:rgba(100,200,100,.1);color:#a0d8a0;border-color:rgba(100,200,100,.3)">Library</span>${esc(meta)}</div>`;
+          const accent=lv.labels?.accent||"";
+          const meta=accent||"ElevenLabs";
+          linfo.innerHTML=`<div class="voice-card-name">${esc(lv.name)}</div><div class="voice-card-meta"><span class="voice-source-pill designed" style="background:rgba(100,200,100,.1);color:#a0d8a0;border-color:rgba(100,200,100,.3)">Library</span>${genderPill(lv.labels?.gender)}${esc(meta)}</div>`;
           const lplay=document.createElement("button");lplay.className="voice-play-btn";lplay.textContent="▶";lplay.title="Play preview";
-          lplay.onclick=e=>{e.stopPropagation();const el=$("voice-preview-audio");if(el&&lv.preview_url){el.src=lv.preview_url;el.play().catch(()=>{});}};
+          lplay.onclick=e=>{e.stopPropagation();toggleVoicePreview(lplay,async()=>lv.preview_url||null);};
           lc.append(li,linfo,lplay);
           lc.addEventListener("click",()=>{selectedVoiceId=lv.voice_id;showView("voice");});
           lc.draggable=true;
@@ -1134,7 +1233,7 @@ function setupPvVoiceDropSlot(p, initValue=false){
   }
   if(meta)meta.textContent=linkedVoice?`ElevenLabs · ${linkedVoice.name}`:p.voice_id?`ElevenLabs · ${p.voice_id.slice(0,10)}…`:"No custom voice";
   const previewUrl=linkedVoice?.preview_url||p.voice_preview_url||"";
-  if(playBtn){playBtn.hidden=!previewUrl;playBtn.onclick=()=>{const audio=$("voice-preview-audio");if(audio&&previewUrl){audio.src=previewUrl;audio.play().catch(()=>{});}};}
+  if(playBtn){playBtn.hidden=!previewUrl;_setPlayBtnIcon(playBtn,"play");playBtn.onclick=()=>toggleVoicePreview(playBtn,async()=>previewUrl||null);}
   if(unlinkBtn)unlinkBtn.hidden=!p.voice_id;
 }
 
@@ -1231,6 +1330,28 @@ function initAssistantView(){
   const cm=$("clone-asst-msg");if(cm)cm.value=asst.first_message||"";
   setStatus($("clone-asst-status"),"");
 
+  // Clone avatar slot: prefilled with this assistant's avatar but detachable —
+  // clear it (✕) and drag another ready avatar in to retarget the clone.
+  caCloneAvatar = asst.avatar_id
+    ? {id:asst.avatar_id, name:asst.avatar?.name||avatarName, image_url:asst.avatar?.image_url||avatarUrl}
+    : null;
+  caClonePersonaId = asst.persona_id;
+  renderCloneAsstAvatarSlot();
+  const cslot=$("clone-asst-avatar-slot");
+  if(cslot){
+    cslot.ondragover=e=>{e.preventDefault();cslot.classList.add("drag-over");};
+    cslot.ondragleave=()=>cslot.classList.remove("drag-over");
+    cslot.ondrop=e=>{
+      e.preventDefault();cslot.classList.remove("drag-over");
+      try{const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");
+        if(d.type!=="avatar"||!d.id)return;
+        caCloneAvatar={id:d.id,name:d.name,image_url:d.image_url};
+        caClonePersonaId=d.persona_id;
+        renderCloneAsstAvatarSlot();
+      }catch{}
+    };
+  }
+
   // Reset tab active states to default ca-call
   const tabBar = document.querySelector('.tab-bar[data-group="ca"]');
   if (tabBar) {
@@ -1252,19 +1373,21 @@ function initVoiceDesignView(){
   // Reset design tab
   const nameEl=$("vd-name");if(nameEl)nameEl.value="";
   const descEl=$("vd-description");if(descEl)descEl.value="";
+  setVdGender("");
   setStatus($("vd-design-status"),"");
   // Reset clone tab
   const cnEl=$("vd-clone-name");if(cnEl)cnEl.value="";
   const sampleEl=$("vd-clone-sample");if(sampleEl)sampleEl.value="";
   const snEl=$("vd-clone-sample-name");if(snEl)snEl.textContent="";
   const origArea=$("vd-clone-original-area");if(origArea)origArea.hidden=true;
+  setVdCloneGender("");
   setStatus($("vd-clone-status"),"");
   vdCloneSampleFile=null;
   // Reset persona toggle + slot
   vdDroppedPersonaId=null;
   const toggle=$("vd-include-persona");
   const slotWrap=$("vd-persona-slot-wrap");
-  if(toggle){toggle.checked=false;toggle.onchange=()=>{if(slotWrap)slotWrap.hidden=!toggle.checked;if(!toggle.checked){vdDroppedPersonaId=null;renderVdPersonaSlot();}};}
+  if(toggle){toggle.checked=false;toggle.onchange=()=>{if(slotWrap)slotWrap.hidden=!toggle.checked;if(!toggle.checked){vdDroppedPersonaId=null;renderVdPersonaSlot();renderVdPresets();}};}
   if(slotWrap)slotWrap.hidden=true;
   renderVdPersonaSlot();
   const slot=$("vd-persona-drop-slot");
@@ -1273,7 +1396,7 @@ function initVoiceDesignView(){
     slot.ondragleave=()=>slot.classList.remove("drag-over");
     slot.ondrop=e=>{
       e.preventDefault();slot.classList.remove("drag-over");
-      try{const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");if(d.type!=="persona")return;vdDroppedPersonaId=d.id;renderVdPersonaSlot();}catch{}
+      try{const d=JSON.parse(e.dataTransfer.getData("text/plain")||"{}");if(d.type!=="persona")return;vdDroppedPersonaId=d.id;renderVdPersonaSlot();pruneVdPresetsToGender();renderVdPresets();}catch{}
     };
   }
   // Voice design uses the same multi-select preset UI as the avatar
@@ -1292,13 +1415,20 @@ function initVoiceDesignView(){
 // Stable closure used as both the initial render AND the onCat callback,
 // so clicking category tabs always re-renders the chip grid (without it,
 // the second click only updates the state variable and the DOM goes stale).
+// Effective gender for preset filtering: a linked persona's known gender wins
+// (it's authoritative server-side too), otherwise the user-selected gender.
+function vdEffectiveGender(){
+  const linkedPersona=vdDroppedPersonaId?studio.find(p=>p.id===vdDroppedPersonaId):null;
+  const pg=linkedPersona?.gender;
+  if(pg==="male"||pg==="female")return pg;
+  return vdSelectedGender||"unknown";
+}
 function renderVdPresets(){
   const catsEl=$("vd-preset-cats"),chipsEl=$("vd-preset-chips");
   if(!catsEl||!chipsEl)return;
-  // Filter by the linked persona's gender if one was dropped, else show all.
-  const linkedPersona=vdDroppedPersonaId?studio.find(p=>p.id===vdDroppedPersonaId):null;
-  const gender=linkedPersona?.gender||"unknown";
-  renderPresetUI(catsEl,chipsEl,vdSelectedVoicePresetIds,vdVoiceCat,gender,
+  // Show only presets matching the effective gender (plus unisex). Until a
+  // gender is picked (and no persona attached) we show everything.
+  renderPresetUI(catsEl,chipsEl,vdSelectedVoicePresetIds,vdVoiceCat,vdEffectiveGender(),
     ()=>refreshVdPresetIndicator(),
     cat=>{vdVoiceCat=cat;renderVdPresets();},
     VOICE_PRESETS);
@@ -1322,12 +1452,53 @@ function renderVdPersonaSlot(){
     const p=studio.find(x=>x.id===vdDroppedPersonaId);
     const name=p?p.name:`Persona #${vdDroppedPersonaId}`;
     const imgUrl=p?.image_url||PLACEHOLDER;
-    slot.innerHTML=`<img class="slot-thumb" src="${imgUrl.replace(/"/g,'%22')}" alt=""/><span style="font-size:13px;font-weight:600;flex:1">${esc(name)}</span><button type="button" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:0" title="Clear" onclick="vdDroppedPersonaId=null;renderVdPersonaSlot()">✕</button>`;
+    slot.innerHTML=`<img class="slot-thumb" src="${imgUrl.replace(/"/g,'%22')}" alt=""/><span style="font-size:13px;font-weight:600;flex:1">${esc(name)}</span><button type="button" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:0" title="Clear" onclick="vdDroppedPersonaId=null;renderVdPersonaSlot();renderVdPresets()">✕</button>`;
   }else{
     slot.innerHTML='<span class="drop-hint">Drag a persona from the Personas panel</span>';
   }
 }
 
+
+/* ── Voice-design gender selector (required) ── */
+// Drives both the highlighted selection AND the gender-filtered preset list:
+// selecting a gender prunes any now-hidden presets and re-renders the chips.
+function setVdGender(g){
+  vdSelectedGender=g;
+  $("vd-gender-seg")?.querySelectorAll(".preset-chip").forEach(el=>{
+    const on=el.dataset.gender===g;el.classList.toggle("selected",on);el.setAttribute("aria-checked",on?"true":"false");
+  });
+  pruneVdPresetsToGender();
+  renderVdPresets();
+}
+// Drop selected presets that are hidden under the effective gender filter so
+// the assembled brief never carries an off-gender preset.
+function pruneVdPresetsToGender(){
+  const g=vdEffectiveGender();
+  if(g==="unknown")return;
+  for(let i=vdSelectedVoicePresetIds.length-1;i>=0;i--){
+    const pr=VOICE_PRESETS.find(p=>p.id===vdSelectedVoicePresetIds[i]);
+    if(pr&&pr.gender!=="unisex"&&pr.gender!==g)vdSelectedVoicePresetIds.splice(i,1);
+  }
+  refreshVdPresetIndicator();
+}
+$("vd-gender-seg")?.querySelectorAll(".preset-chip").forEach(el=>{
+  const pick=()=>setVdGender(el.dataset.gender);
+  el.addEventListener("click",pick);
+  el.addEventListener("keydown",e=>{if(e.key===" "||e.key==="Enter"){e.preventDefault();pick();}});
+});
+
+/* ── Voice-clone gender selector (required) ── */
+function setVdCloneGender(g){
+  vdCloneSelectedGender=g;
+  $("vd-clone-gender-seg")?.querySelectorAll(".preset-chip").forEach(el=>{
+    const on=el.dataset.gender===g;el.classList.toggle("selected",on);el.setAttribute("aria-checked",on?"true":"false");
+  });
+}
+$("vd-clone-gender-seg")?.querySelectorAll(".preset-chip").forEach(el=>{
+  const pick=()=>setVdCloneGender(el.dataset.gender);
+  el.addEventListener("click",pick);
+  el.addEventListener("keydown",e=>{if(e.key===" "||e.key==="Enter"){e.preventDefault();pick();}});
+});
 
 $("vd-design-submit-btn")?.addEventListener("click",async()=>{
   const name=($("vd-name")?.value||"").trim()||"New Voice";
@@ -1335,11 +1506,13 @@ $("vd-design-submit-btn")?.addEventListener("click",async()=>{
   const btn=$("vd-design-submit-btn"),statusEl=$("vd-design-status");
   const includePersona=$("vd-include-persona")?.checked&&!!vdDroppedPersonaId;
   const hasPresets=vdSelectedVoicePresetIds.length>0;
+  if(!vdSelectedGender){setStatus(statusEl,"Please select a gender for the voice.","error");return;}
   if(!hasPresets&&!description&&!includePersona){setStatus(statusEl,"Please describe the voice, pick at least one preset, or enable persona voice profile.","error");return;}
   btn.disabled=true;setStatus(statusEl,"Creating voice…");
   try{
     const fd=new FormData();
     fd.append("name",name);
+    fd.append("gender",vdSelectedGender);
     // Repeated multipart field — FastAPI binds to ``voice_preset_ids: list[str]``.
     vdSelectedVoicePresetIds.forEach(id=>fd.append("voice_preset_ids",id));
     if(description)fd.append("description",description);
@@ -1364,9 +1537,10 @@ $("vd-clone-submit-btn")?.addEventListener("click",async()=>{
   if(!vdCloneSampleFile){setStatus($("vd-clone-status"),"Pick an audio file first.","error");return;}
   const name=($("vd-clone-name")?.value||"").trim()||"Cloned Voice";
   const btn=$("vd-clone-submit-btn"),statusEl=$("vd-clone-status");
+  if(!vdCloneSelectedGender){setStatus(statusEl,"Please select a gender for the voice.","error");return;}
   btn.disabled=true;setStatus(statusEl,"Cloning voice…");
   try{
-    const fd=new FormData();fd.append("voice_sample",vdCloneSampleFile,vdCloneSampleFile.name);fd.append("name",name);
+    const fd=new FormData();fd.append("voice_sample",vdCloneSampleFile,vdCloneSampleFile.name);fd.append("name",name);fd.append("gender",vdCloneSelectedGender);
     {const _r=await fetch(`/${TENANT_ID}/voices/clone`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"voice clone failed");}
     setStatus(statusEl,"Voice cloning started — watch the Voices panel.","success");
     await refreshAll();
@@ -1440,14 +1614,17 @@ function renderAvPromptPreview(){
 }
 
 async function genAvatarPreview(personaId,name,sel,themeEl,previewAreaEl,imgEl,statusEl){
-  const tp=[p2prompt(sel),themeEl?.value.trim()||""].filter(Boolean).join(", ");
+  const userPrompt=themeEl?.value.trim()||"";
   setStatus(statusEl,"Generating preview…");if(previewAreaEl)previewAreaEl.hidden=true;
-  const fd=new FormData();fd.append("persona_id",personaId);fd.append("name",name);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(sel));
+  // Send presets and the user's free text separately so the backend persists
+  // only the user prompt (never the assembled preset text).
+  const fd=new FormData();fd.append("persona_id",personaId);fd.append("name",name);
+  fd.append("custom_prompt",userPrompt);fd.append("preset_ids",JSON.stringify(sel));
   const _r=await fetch(`/${TENANT_ID}/avatars/preview`,{method:"POST",body:fd});
   if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar preview failed");
   const data=await _r.json();
   if(imgEl&&data.preview_url)imgEl.src=data.preview_url;if(previewAreaEl)previewAreaEl.hidden=false;
-  setStatus(statusEl,"Preview ready.");return tp;
+  setStatus(statusEl,"Preview ready.");return userPrompt;
 }
 
 function applyAvSkipStyle(){
@@ -1565,6 +1742,15 @@ $("nav-generate-btn").addEventListener("click",async()=>{
 });
 
 /* ── New Assistant view (standalone, with avatar drop slot) ── */
+function renderCloneAsstAvatarSlot(){
+  const slot=$("clone-asst-avatar-slot");if(!slot)return;
+  if(!caCloneAvatar){
+    slot.innerHTML='<span class="drop-hint">Drag a ready avatar here from the Avatars panel</span>';
+    return;
+  }
+  const ownerName=studio.find(p=>p.id===caClonePersonaId)?.name||"";
+  slot.innerHTML=`<img class="slot-thumb" src="${esc(caCloneAvatar.image_url||PLACEHOLDER)}" alt=""/><b>${esc(caCloneAvatar.name||"Avatar")}</b>${ownerName?`<span class="drop-hint" style="margin-left:auto">via ${esc(ownerName)}</span>`:""}<button type="button" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;margin-left:12px;padding:0" title="Detach avatar" onclick="caCloneAvatar=null;caClonePersonaId=null;renderCloneAsstAvatarSlot()">✕</button>`;
+}
 function renderNaAvatarSlot(){
   const slot=$("na-avatar-drop-slot");if(!slot)return;
   const btn=$("na-create-asst-btn");
@@ -1661,10 +1847,12 @@ $("clone-av-gen-btn").addEventListener("click",async()=>{
 $("clone-av-regen-btn").addEventListener("click",()=>$("clone-av-gen-btn").click());
 $("clone-av-save-btn").addEventListener("click",async()=>{
   const p=getPersona();if(!p)return;const name=$("clone-av-name")?.value.trim();if(!name)return;
-  const tp=[p2prompt(clonePresets),$("clone-av-theme")?.value.trim()||""].filter(Boolean).join(", ");
+  const userPrompt=$("clone-av-theme")?.value.trim()||"";
+  const label=[p2prompt(clonePresets),userPrompt].filter(Boolean).join(", ");
   $("clone-av-save-btn").disabled=true;setStatus($("clone-av-status"),"Saving…");
   try{
-    const fd=new FormData();fd.append("persona_id",p.id);fd.append("name",name);fd.append("decoration",tp);fd.append("theme_prompt",tp);fd.append("preset_ids",JSON.stringify(clonePresets));
+    // decoration = display label (presets + user text); theme_prompt = user text only.
+    const fd=new FormData();fd.append("persona_id",p.id);fd.append("name",name);fd.append("decoration",label);fd.append("theme_prompt",userPrompt);fd.append("preset_ids",JSON.stringify(clonePresets));
     {const _r=await fetch(`/${TENANT_ID}/avatars`,{method:"POST",body:fd});if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"avatar save failed");}setStatus($("clone-av-status"),"Clone queued!","success");await refreshAll();
   }catch(e){setStatus($("clone-av-status"),e.message,"error");}finally{$("clone-av-save-btn").disabled=false;}
 });
@@ -1675,9 +1863,10 @@ $("clone-asst-btn").addEventListener("click",async()=>{
   const asst=getAssistant();if(!asst)return;
   const name=$("clone-asst-name")?.value.trim(),prompt=$("clone-asst-prompt")?.value.trim(),fm=$("clone-asst-msg")?.value.trim();
   if(!name||!prompt)return setStatus($("clone-asst-status"),"Name and instructions required.","error");
+  if(!caCloneAvatar)return setStatus($("clone-asst-status"),"Drop an avatar onto the slot first.","error");
   $("clone-asst-btn").disabled=true;setStatus($("clone-asst-status"),"Creating…");
   try{
-    const _r=await fetch(`/${TENANT_ID}/assistants`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,prompt,first_message:fm,persona_id:asst.persona_id,avatar_id:asst.avatar_id})});
+    const _r=await fetch(`/${TENANT_ID}/assistants`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,prompt,first_message:fm,persona_id:caClonePersonaId,avatar_id:caCloneAvatar.id})});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"assistant clone failed");
     const r=await _r.json();
     setStatus($("clone-asst-status"),`'${r.name}' created!`,"success");
@@ -1697,8 +1886,6 @@ document.querySelectorAll(".section-collapse-btn").forEach(btn=>{
   btn.addEventListener("click",e=>{e.stopPropagation();const s=$(btn.dataset.section);if(s)s.classList.toggle("collapsed");});
 });
 
-/* ── Pane maximize ── */
-const _lpm=$("left-pane-max");if(_lpm)_lpm.addEventListener("click",()=>{const p=$("left-pane");p.classList.toggle("pane-maximized");_lpm.textContent=p.classList.contains("pane-maximized")?"⤡":"⤢";});
 
 /* ── Pane resize ── */
 function initPaneResize(handleId,paneId,varName){
@@ -1990,7 +2177,8 @@ async function loadAssistants(){
   if(status) url += `status=${status}&`;
   if(avatar_id) url += `avatar_id=${avatar_id}&`;
   const r=await fetch(url);
-  assistants=await r.json();
+  const data=r.ok?await r.json().catch(()=>[]):[];
+  assistants=Array.isArray(data)?data:[];
 }
 
 async function loadVoices(){
@@ -2004,14 +2192,16 @@ async function loadVoices(){
   else if(source === "library") url += `source=library&`;
   if(persona_id) url += `persona_id=${persona_id}&`;
   const r=await fetch(url);
-  voices=await r.json();
+  const data=r.ok?await r.json().catch(()=>[]):[];
+  voices=Array.isArray(data)?data:[];
 }
 
 async function loadLibraryVoices(){
   if(libraryVoices.length)return;
   try{
     const r=await fetch(`/${TENANT_ID}/voices/library`);
-    libraryVoices=await r.json();
+    const data=r.ok?await r.json().catch(()=>[]):[];
+    libraryVoices=Array.isArray(data)?data:[];
   }catch{}
 }
 
@@ -2066,12 +2256,39 @@ document.addEventListener("click", e => {
   }
 });
 
+/* ── Tenant selector ── */
+function initTenantBar(){
+  const input=$("tenant-id-input"),apply=$("tenant-id-apply");
+  if(!input||!apply)return;
+  input.value=TENANT_ID;
+  input.placeholder=DEFAULT_TENANT_ID;
+  const commit=async()=>{
+    const next=(input.value||"").trim()||DEFAULT_TENANT_ID;
+    input.value=next;
+    if(next===TENANT_ID)return;
+    TENANT_ID=next;
+    localStorage.setItem("lili_tenant_id",next);
+    // Re-scope the whole UI: drop the current selection and reload all data.
+    selectedPersonaId=null;selectedAvatarId=null;selectedVoiceId=null;
+    studio=[];assistants=[];voices=[];selectedPersonaAvatars=[];allAvatars=[];libraryVoices=[];
+    apply.disabled=true;apply.textContent="…";
+    try{
+      showView("welcome");
+      await refreshAll();
+      loadLibraryVoices().then(()=>renderLeftVoices()).catch(()=>{});
+    }finally{apply.disabled=false;apply.textContent="Apply";}
+  };
+  apply.addEventListener("click",commit);
+  input.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();commit();}});
+}
+
 /* ── Boot ── */
 window.addEventListener("DOMContentLoaded",async()=>{
   setCallMode("hidden");
+  initTenantBar();
   initFilters();
   ALL_VIEWS.forEach(v=>{const e=$(v);if(e)e.hidden=(v!=="cv-welcome");});
-  try{await Promise.all([loadPresets(),loadStudio(),loadAssistants(),loadVoices(),loadAllAvatars()]);}catch(e){console.error("Initial load error:",e);}
+  try{await Promise.all([loadPresets(),loadStudio(),loadAssistants(),loadVoices(),loadAvatars(),loadAllAvatars()]);}catch(e){console.error("Initial load error:",e);}
   renderAll();  // also attaches element-level pollers to anything in-flight on load
   loadLibraryVoices().then(()=>renderLeftVoices()).catch(()=>{});
 });
