@@ -181,7 +181,7 @@ function openCropper(file){sourceFile=file;destroyCropper();revoke(sourceUrl);so
   $("cropper-image").onload=()=>{cropper=new window.Cropper($("cropper-image"),{aspectRatio:CROP_RATIO,viewMode:1,dragMode:"move",autoCropArea:.9,cropBoxResizable:false,background:false,responsive:true,zoomable:true,wheelZoomRatio:0.1});};
 }
 function closeCropper(){$("cropper-modal").hidden=true;destroyCropper();}
-async function getCropped(){return new Promise((res,rej)=>{const c=cropper?.getCroppedCanvas({width:CROP_W,height:CROP_H,fillColor:"#fff"});if(!c)return rej(new Error("Cropper not ready"));c.toBlob(b=>b?res(b):rej(new Error("Crop failed")),"image/png",.95);});}
+async function getCropped(){return new Promise((res,rej)=>{const c=cropper?.getCroppedCanvas({width:CROP_W,height:CROP_H,fillColor:"#fff"});if(!c)return rej(new Error("Cropper not ready"));c.toBlob(b=>b?res(b):rej(new Error("Crop failed")),"image/jpeg",.90);});}
 function showPersonaPreview(blob){croppedBlob=blob;revoke(croppedUrl);croppedUrl=URL.createObjectURL(blob);
   setThumb($("persona-preview-thumb"),croppedUrl);
   $("persona-upload-zone").hidden=true;$("persona-name-prearea").hidden=true;$("persona-preview-area").hidden=false;
@@ -1569,7 +1569,7 @@ $("create-persona-btn").addEventListener("click",async()=>{
   if(!croppedBlob)return setStatus($("persona-status"),"Crop an image first.","error");
   $("create-persona-btn").disabled=true;setStatus($("persona-status"),"Uploading…");
   try{
-    const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.png");
+    const fd=new FormData();fd.append("name",name);fd.append("persona_image",croppedBlob,"persona.jpg");
     const _r=await fetch(`/${TENANT_ID}/personas`,{method:"POST",body:fd});
     if(!_r.ok)throw new Error((await _r.json().catch(()=>({}))).detail||"persona create failed");
     const p=await _r.json();
