@@ -15,6 +15,7 @@ dependencies = [
   "livekit-agents[openai,google,deepgram,elevenlabs,cartesia,silero,simli]>=1.5.13",
   "sqlalchemy[asyncio]>=2.0.30",
   "asyncpg>=0.29.0",
+  "psycopg[binary]>=3.1.0",
   "aiosqlite>=0.20.0",
   "alembic>=1.13.0",
   "azure-identity>=1.17.0",

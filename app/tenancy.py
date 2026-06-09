@@ -60,21 +60,59 @@ BlobLike = Union[BlobStore, LocalBlobStore]
 _ENGINE_CACHE_LIMIT = 64
 
 
-def _reconcile_sqlite_columns(conn) -> None:  # noqa: ANN001 (sync DBAPI conn)
-    """Add any ORM-model columns that are missing from existing SQLite tables.
+def _pg_url_for_asyncpg(url: str) -> tuple[str, dict]:
+    """Rewrite any postgresql:// variant to use the asyncpg driver.
 
-    ``Base.metadata.create_all`` never alters existing tables, so a DB created
-    before a model gained a column would be missing it. This runs ``ALTER TABLE
-    … ADD COLUMN`` for each absent column, deriving a safe DEFAULT for NOT NULL
-    columns. Idempotent and additive — never drops or rewrites anything.
+    Returns (normalized_url, connect_args) where connect_args carries any
+    asyncpg-specific settings extracted from the URL query string (e.g.
+    ``?schema=...`` → ``server_settings={"search_path": schema}`` since
+    asyncpg does not accept ``schema`` as a connect keyword).
     """
-    from sqlalchemy import Integer, Numeric, inspect, text
+    from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+    if url.startswith("postgresql+asyncpg://"):
+        pass
+    elif url.startswith(("postgresql+psycopg2://", "postgresql+psycopg://")):
+        url = "postgresql+asyncpg://" + url.split("://", 1)[1]
+    elif url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+
+    # Extract ?schema=... and convert to asyncpg server_settings.
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    connect_args: dict = {}
+    schema = qs.pop("schema", None)
+    if schema:
+        connect_args["server_settings"] = {"search_path": schema[0]}
+    # Rebuild URL without the schema param.
+    clean_qs = urlencode({k: v[0] for k, v in qs.items()})
+    url = urlunparse(parsed._replace(query=clean_qs))
+    return url, connect_args
+
+
+def _reconcile_columns(conn) -> None:  # noqa: ANN001 (sync DBAPI conn)
+    """Create missing tables and add missing columns — never drops anything.
+
+    Works for both SQLite (aiosqlite) and PostgreSQL (asyncpg).  Called via
+    ``conn.run_sync`` so ``conn`` is a synchronous DBAPI-level connection
+    wrapper supplied by SQLAlchemy.
+
+    Strategy:
+    - ``Base.metadata.create_all`` already ran just before this call, so any
+      brand-new tables are already fully formed.
+    - For pre-existing tables that are missing columns (because the model grew
+      after the DB was first provisioned), we emit ``ALTER TABLE … ADD COLUMN``
+      with an appropriate DEFAULT so the statement succeeds on non-empty tables.
+    """
+    from sqlalchemy import Integer, Numeric, inspect
 
     insp = inspect(conn)
     existing_tables = set(insp.get_table_names())
     for table in Base.metadata.sorted_tables:
         if table.name not in existing_tables:
-            continue  # create_all just made it — already matches the model
+            continue  # create_all just created it — columns already match
         have = {c["name"] for c in insp.get_columns(table.name)}
         for col in table.columns:
             if col.name in have:
@@ -82,9 +120,8 @@ def _reconcile_sqlite_columns(conn) -> None:  # noqa: ANN001 (sync DBAPI conn)
             ddl_type = col.type.compile(dialect=conn.dialect)
             clause = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl_type}'
             if not col.nullable:
-                # SQLite requires a DEFAULT when adding a NOT NULL column to a
-                # populated table. Prefer the model's declared default, else a
-                # type-appropriate zero value.
+                # Both SQLite and Postgres require a DEFAULT when adding a NOT
+                # NULL column to a populated table.
                 default_lit: str | None = None
                 sd = col.server_default
                 if sd is not None and getattr(sd, "arg", None) is not None:
@@ -180,27 +217,23 @@ class _TenantRegistry:
                     cur.execute("PRAGMA foreign_keys=ON")
                     cur.close()
             else:
+                _pg_url, _connect_args = _pg_url_for_asyncpg(db_url)
                 engine = create_async_engine(
-                    db_url,
+                    _pg_url,
+                    connect_args=_connect_args,
                     pool_pre_ping=True,
                     pool_size=5,
                     max_overflow=5,
                 )
 
-            # For SQLite tenants we materialise the schema on first connect
-            # via ``Base.metadata.create_all`` instead of running Alembic
-            # (the migrations were authored for Postgres; ``create_all``
-            # gives an equivalent schema that matches the ORM models).
-            if is_sqlite:
-                async with engine.begin() as conn:
-                    await conn.run_sync(Base.metadata.create_all)
-                    # ``create_all`` only creates *missing tables*, never adds
-                    # columns to tables that already exist. For long-lived local
-                    # SQLite DBs we additively reconcile any model columns the
-                    # table is missing (the SQLite analogue of an Alembic
-                    # ``add_column`` migration), so schema changes don't require
-                    # a manual rebuild.
-                    await conn.run_sync(_reconcile_sqlite_columns)
+            # Materialise the schema on first connect via ``create_all`` +
+            # ``_reconcile_columns``.  For SQLite this replaces Alembic
+            # entirely.  For Postgres it is an additive-only safety net that
+            # creates missing tables and adds missing columns — idempotent and
+            # non-destructive, so it is safe to run on every cold start.
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+                await conn.run_sync(_reconcile_columns)
 
             sessionmaker = async_sessionmaker(
                 engine, expire_on_commit=False, class_=AsyncSession

@@ -38,6 +38,8 @@ target_metadata = Base.metadata
 
 
 def _resolve_url() -> str:
+    from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
     x_args = context.get_x_argument(as_dictionary=True)
     url = x_args.get("dburl") or config.get_main_option("sqlalchemy.url") or os.getenv(
         "ALEMBIC_DATABASE_URL", ""
@@ -46,13 +48,26 @@ def _resolve_url() -> str:
         raise RuntimeError(
             "No database URL provided. Pass -x dburl=... or set sqlalchemy.url."
         )
-    # Alembic runs sync; downgrade any +asyncpg URL to +psycopg.
+    # Alembic runs sync; normalise to +psycopg (v3).
     if url.startswith("postgresql+asyncpg://"):
         url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
     elif url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg://", 1)
     elif url.startswith("postgresql://") and "+psycopg" not in url:
         url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    # psycopg (v3) does not accept ?schema=...; convert to options=-c search_path=...
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    schema = qs.pop("schema", None)
+    if schema:
+        existing_options = qs.pop("options", [""])[0]
+        new_options = f"-c search_path={schema[0]}"
+        if existing_options:
+            new_options = f"{existing_options} {new_options}"
+        qs["options"] = [new_options]
+    clean_qs = urlencode({k: v[0] for k, v in qs.items()})
+    url = urlunparse(parsed._replace(query=clean_qs))
     return url
 
 
