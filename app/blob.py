@@ -2,12 +2,8 @@
 
 A ``BlobStore`` is bound to a single tenant's storage account + container
 (resolved from Key Vault in ``app.tenancy``). It uploads bytes to a stable
-key and returns the **bare, permanent blob URL** — no SAS token, no expiry.
-
-The container's access ACL must be configured for anonymous read at the
-storage-account level (e.g. ``az storage container set-permission --name
-<container> --public-access blob``). This is a devops/provisioning step and
-is documented in the README. Without that ACL, the returned URLs will 403.
+key. ``signed_url()`` returns a time-limited SAS URL (default 1 hour) so
+the container can stay private — no public-access ACL required.
 
 Key conventions inside the container:
 
@@ -21,7 +17,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from azure.storage.blob import ContentSettings
+from datetime import datetime, timedelta, timezone
+
+from azure.storage.blob import BlobSasPermissions, ContentSettings, generate_blob_sas
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 
 from .config import settings  # noqa: F401  (kept for future config reads)
@@ -100,10 +98,14 @@ class BlobStore:
             # Already gone — treat as success.
             pass
 
-    def signed_url(self, key: str) -> str:
-        """Return the permanent blob URL for an existing key.
-
-        Naming kept for parity with the previous SAS-based API; the URL is
-        no longer signed and never expires.
-        """
-        return self._public_url(key)
+    def signed_url(self, key: str, expiry_hours: int = 1) -> str:
+        """Return a time-limited SAS URL for the given blob key."""
+        sas_token = generate_blob_sas(
+            account_name=self._account_name,
+            container_name=self._container_name,
+            blob_name=key,
+            account_key=self._account_key,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.now(timezone.utc) + timedelta(hours=expiry_hours),
+        )
+        return f"{self._public_url(key)}?{sas_token}"

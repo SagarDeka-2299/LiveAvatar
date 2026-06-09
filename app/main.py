@@ -719,9 +719,26 @@ def _local_blob_to_base64_url(url: str) -> str:
         return url
 
 
+def _to_sas_url(ctx: "TenantContext", url: str) -> str:
+    """Convert a stored blob URL to a usable URL for API consumers.
+
+    - Local blobs  → base64 data URI (dev/demo mode)
+    - Azure blobs  → 1-hour SAS URL
+    - Anything else (empty, external) → returned unchanged
+    """
+    if not url:
+        return url
+    if "/local-blob/" in url:
+        return _local_blob_to_base64_url(url)
+    key = _key_from_blob_url(ctx, url)
+    if key is not None:
+        return ctx.blob.signed_url(key)
+    return url
+
+
 # ── SQLAlchemy → Pydantic serialisation ───────────────────────────────────────
 
-def _avatar_row_to_model(row: AvatarRow) -> S.PersonaAvatar:
+def _avatar_row_to_model(ctx: "TenantContext", row: AvatarRow) -> S.PersonaAvatar:
     return S.PersonaAvatar(
         id=row.id,
         persona_id=row.persona_id,
@@ -730,7 +747,7 @@ def _avatar_row_to_model(row: AvatarRow) -> S.PersonaAvatar:
         theme_prompt=row.theme_prompt,
         preset_ids=_parse_preset_ids(row.preset_ids),
         face_id=row.face_id,
-        image_url=_local_blob_to_base64_url(row.image_url),
+        image_url=_to_sas_url(ctx, row.image_url),
         status=row.status,
         progress=row.progress,
         stage=row.stage,
@@ -740,12 +757,12 @@ def _avatar_row_to_model(row: AvatarRow) -> S.PersonaAvatar:
 
 
 def _persona_row_to_model(
-    row: PersonaRow, avatars: list[S.PersonaAvatar]
+    ctx: "TenantContext", row: PersonaRow, avatars: list[S.PersonaAvatar]
 ) -> S.PersonaEntity:
     return S.PersonaEntity(
         id=row.id,
         name=row.name,
-        image_url=_local_blob_to_base64_url(row.image_url),
+        image_url=_to_sas_url(ctx, row.image_url),
         gender=row.gender,
         status=row.status,
         progress=row.progress,
@@ -756,8 +773,8 @@ def _persona_row_to_model(
         voice_id=row.voice_id,
         voice_source=row.voice_source,
         voice_description=row.voice_description,
-        voice_sample_url=_local_blob_to_base64_url(row.voice_sample_url),
-        voice_preview_url=_local_blob_to_base64_url(row.voice_preview_url),
+        voice_sample_url=_to_sas_url(ctx, row.voice_sample_url),
+        voice_preview_url=_to_sas_url(ctx, row.voice_preview_url),
         voice_status=row.voice_status,
         voice_last_error=row.voice_last_error,
         avatars=avatars,
@@ -765,7 +782,7 @@ def _persona_row_to_model(
     )
 
 
-def _voice_row_to_model(row: VoiceRow) -> S.VoiceEntity:
+def _voice_row_to_model(ctx: "TenantContext", row: VoiceRow) -> S.VoiceEntity:
     return S.VoiceEntity(
         id=row.id,
         name=row.name,
@@ -775,8 +792,8 @@ def _voice_row_to_model(row: VoiceRow) -> S.VoiceEntity:
         description=row.description,
         preset_ids=_parse_preset_ids(getattr(row, "preset_ids", "[]")),
         user_prompt=getattr(row, "user_prompt", "") or "",
-        sample_url=_local_blob_to_base64_url(row.sample_url),
-        preview_url=_local_blob_to_base64_url(row.preview_url),
+        sample_url=_to_sas_url(ctx, row.sample_url),
+        preview_url=_to_sas_url(ctx, row.preview_url),
         persona_id=row.persona_id,
         gender=row.gender,
         status=row.status,
@@ -985,7 +1002,7 @@ async def list_personas(
             S.PersonaListEntity(
                 id=p.id,
                 name=p.name,
-                image_url=_local_blob_to_base64_url(p.image_url),
+                image_url=_to_sas_url(ctx, p.image_url),
                 created_at=p.created_at,
                 status=p.status,
                 gender=p.gender or "unknown",
@@ -1007,7 +1024,7 @@ async def get_persona(
     for av in avatars:
         if av.status == "processing":
             await _refresh_avatar_status(ctx, av)
-    return _persona_row_to_model(persona, [_avatar_row_to_model(av) for av in avatars])
+    return _persona_row_to_model(ctx, persona, [_avatar_row_to_model(ctx, av) for av in avatars])
 
 
 @app.post(
@@ -1193,7 +1210,7 @@ async def patch_persona(
                     )
     updated = await repo.get_persona_entity(ctx.session, persona_id)
     assert updated is not None
-    return _persona_row_to_model(updated, [])
+    return _persona_row_to_model(ctx, updated, [])
 
 
 @app.delete("/{tenant_id}/personas/{persona_id}", status_code=200)
@@ -1290,7 +1307,7 @@ async def list_avatars(
         S.AvatarListEntity(
             id=av.id,
             name=av.name,
-            image_url=_local_blob_to_base64_url(av.image_url),
+            image_url=_to_sas_url(ctx, av.image_url),
             created_at=av.created_at,
             status=av.status,
         )
@@ -1316,13 +1333,13 @@ async def get_avatar(
             persona_model = S.PersonaListEntity(
                 id=persona.id,
                 name=persona.name,
-                image_url=_local_blob_to_base64_url(persona.image_url),
+                image_url=_to_sas_url(ctx, persona.image_url),
                 created_at=persona.created_at,
                 status=persona.status,
                 gender=persona.gender or "unknown",
                 avatar_count=await repo.count_avatars_for_persona(ctx.session, persona.id),
             )
-            
+
     return S.PersonaAvatarDetail(
         id=row.id,
         persona_id=row.persona_id,
@@ -1331,7 +1348,7 @@ async def get_avatar(
         theme_prompt=row.theme_prompt,
         preset_ids=_parse_preset_ids(row.preset_ids),
         face_id=row.face_id,
-        image_url=_local_blob_to_base64_url(row.image_url),
+        image_url=_to_sas_url(ctx, row.image_url),
         status=row.status,
         progress=row.progress,
         stage=row.stage,
@@ -1563,7 +1580,7 @@ async def save_avatar(
                 last_error=None,
             )
         assert row is not None
-        model = _avatar_row_to_model(row)
+        model = _avatar_row_to_model(ctx, row)
 
     logger.info("✅ [Avatar %s] Successfully uploaded to Simli! Face ID: %s (Status: %s)", model.id, face_id, avatar_status)
     if model.status == "processing":
@@ -1722,7 +1739,7 @@ async def list_assistants_endpoint(
         if a.avatar_id is not None:
             av = await repo.get_persona_avatar(ctx.session, a.avatar_id)
             if av is not None:
-                avatar_image_url = _local_blob_to_base64_url(av.image_url)
+                avatar_image_url = _to_sas_url(ctx, av.image_url)
                 avatar_name = av.name
         if a.persona_id is not None:
             p = await repo.get_persona_entity(ctx.session, a.persona_id)
@@ -1760,7 +1777,7 @@ async def get_assistant_endpoint(
             avatar_model = S.AvatarListEntity(
                 id=avatar.id,
                 name=avatar.name,
-                image_url=_local_blob_to_base64_url(avatar.image_url),
+                image_url=_to_sas_url(ctx, avatar.image_url),
                 created_at=avatar.created_at,
                 status=avatar.status,
             )
@@ -2375,7 +2392,7 @@ async def design_voice_standalone(
                 voice_status="processing",
                 voice_last_error=None,
             )
-        snapshot = _voice_row_to_model(row)
+        snapshot = _voice_row_to_model(ctx, row)
 
     asyncio.create_task(
         _run_standalone_voice_design(
@@ -2572,7 +2589,7 @@ async def clone_voice_standalone(
                 voice_status="processing",
                 voice_last_error=None,
             )
-        snapshot = _voice_row_to_model(row)
+        snapshot = _voice_row_to_model(ctx, row)
 
     asyncio.create_task(
         _run_standalone_voice_clone(
@@ -2820,7 +2837,7 @@ async def voice_from_library(
     ]
     if existing:
         logger.info("🎙 [Voice] Reusing existing voice in DB with ID: %s", existing[0].id)
-        return _voice_row_to_model(existing[0])
+        return _voice_row_to_model(ctx, existing[0])
     row = await repo.insert_voice(
         ctx.session,
         name=payload.name or f"EL {payload.voice_id[:8]}",
@@ -2833,7 +2850,7 @@ async def voice_from_library(
         status="ready",
     )
     logger.info("✅ [Voice %s] Premade library voice successfully imported and registered!", row.id)
-    return _voice_row_to_model(row)
+    return _voice_row_to_model(ctx, row)
 
 
 @app.get("/{tenant_id}/voices/preview-default")
@@ -2869,7 +2886,7 @@ async def get_voice_endpoint(
     row = await repo.get_voice(ctx.session, voice_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Voice not found")
-    return _voice_row_to_model(row)
+    return _voice_row_to_model(ctx, row)
 
 
 @app.patch("/{tenant_id}/voices/{voice_id}", response_model=S.VoiceEntity)
@@ -2901,11 +2918,11 @@ async def patch_voice(
         fields["name"] = new_name
 
     if not fields:
-        return _voice_row_to_model(row)
+        return _voice_row_to_model(ctx, row)
 
     updated = await repo.update_voice(ctx.session, voice_id, **fields)
     logger.info("✏️ [Voice %s] Renamed to '%s'", voice_id, fields.get("name"))
-    return _voice_row_to_model(updated or row)
+    return _voice_row_to_model(ctx, updated or row)
 
 
 @app.get("/{tenant_id}/voices/{voice_id}/status", response_model=S.StatusResponse)
