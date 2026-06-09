@@ -33,10 +33,13 @@ from uuid import uuid4
 import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi import Path as PathParam
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import ai_router, elevenlabs_client, repositories as repo, schemas as S
 from app.config import settings
@@ -98,6 +101,46 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # Flatten Pydantic validation errors into a single readable string so the
+    # RBAC gateway can surface the field-level problem in its details payload.
+    errors = []
+    for e in exc.errors():
+        loc = " → ".join(str(p) for p in e["loc"] if p != "body")
+        msg = e["msg"]
+        errors.append(f"{loc}: {msg}" if loc else msg)
+    detail = "; ".join(errors) if errors else str(exc)
+    logger.warning("Validation error on %s %s: %s", request.method, request.url.path, detail)
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exc_handler(request: Request, exc: StarletteHTTPException) -> Response:
+    # Log 5xx errors with full context; pass through to FastAPI's default handler.
+    if exc.status_code >= 500:
+        logger.error(
+            "HTTP %s on %s %s: %s",
+            exc.status_code, request.method, request.url.path, exc.detail,
+        )
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Catch-all: log full traceback so it appears in Dozzle, then return a
+    # structured JSON error so the RBAC gateway can surface the root cause.
+    logger.exception(
+        "Unhandled exception on %s %s",
+        request.method, request.url.path,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+
 
 # ── /demo: reference front-end ────────────────────────────────────────────────
 #
