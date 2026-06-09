@@ -90,6 +90,12 @@ class BlobStore:
         )
         return BlobUploadResult(key=key, url=self._public_url(key))
 
+    async def download_bytes(self, key: str) -> bytes:
+        """Download a blob by key using the account key credential (no SAS needed)."""
+        blob = self._container.get_blob_client(key)
+        stream = await blob.download_blob()
+        return await stream.readall()
+
     async def delete(self, key: str) -> None:
         blob = self._container.get_blob_client(key)
         try:

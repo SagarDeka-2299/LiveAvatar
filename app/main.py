@@ -722,8 +722,13 @@ def _content_type_for_ext(ext: str) -> str:
     }.get(ext.lower(), "application/octet-stream")
 
 
-async def _fetch_url_bytes(url: str) -> bytes:
-    """HTTP-GET a SAS URL (or any URL) and return the bytes."""
+async def _fetch_url_bytes(url: str, ctx: "TenantContext | None" = None) -> bytes:
+    """Fetch bytes from a blob URL.
+
+    For Azure blobs (private container), uses the SDK via ctx.blob to avoid
+    the need for a SAS token or public container ACL. Falls back to HTTP GET
+    for external URLs.
+    """
     if not url:
         raise HTTPException(status_code=404, detail="Asset URL is empty")
     if "/local-blob/" in url:
@@ -735,7 +740,11 @@ async def _fetch_url_bytes(url: str) -> bytes:
             return data
         except Exception as exc:
             logger.error("Failed to read local blob directly: %s", exc)
-            pass
+
+    if ctx is not None:
+        key = _key_from_blob_url(ctx, url)
+        if key is not None:
+            return await ctx.blob.download_bytes(key)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.get(url)
@@ -1426,7 +1435,7 @@ async def avatar_preview(
 
         if skip_style:
             logger.info("🎨 [Avatar Preview] Skip styling selected. Copying base portrait synchronously...")
-            persona_image_bytes = await _fetch_url_bytes(persona.image_url)
+            persona_image_bytes = await _fetch_url_bytes(persona.image_url, ctx)
             avatar = await repo.insert_persona_avatar(
                 ctx.session,
                 persona_id=persona_id,
@@ -1473,7 +1482,7 @@ async def avatar_preview(
             avatar_id = avatar.id
             persona_image_url = persona.image_url
 
-            persona_image_bytes = await _fetch_url_bytes(persona_image_url)
+            persona_image_bytes = await _fetch_url_bytes(persona_image_url, ctx)
             asyncio.create_task(
                 _run_avatar_image_generation(
                     tenant_id=tenant_id,
@@ -1567,7 +1576,7 @@ async def save_avatar(
 
     logger.info("💾 [Avatar %s] Starting save_avatar pipeline for '%s'...", draft_avatar_id or "new", name)
     logger.info("📥 [Avatar %s] Fetching avatar image bytes from URL: %s...", draft_avatar_id or "new", source_image_url)
-    image_bytes = await _fetch_url_bytes(source_image_url)
+    image_bytes = await _fetch_url_bytes(source_image_url, ctx)
 
     try:
         logger.info("📤 [Avatar %s] Uploading image (%d bytes) to Simli API...", draft_avatar_id or "new", len(image_bytes))
@@ -1729,7 +1738,7 @@ async def retry_avatar(
         persona_image_url = persona.image_url
         name = row.name or f"avatar-{avatar_id}"
         logger.info("🎨 [Avatar %s] Fetching base persona portrait bytes to re-generate avatar...", avatar_id)
-        persona_image_bytes = await _fetch_url_bytes(persona_image_url)
+        persona_image_bytes = await _fetch_url_bytes(persona_image_url, ctx)
         logger.info("🎨 [Avatar %s] Launching background image generation task...", avatar_id)
         asyncio.create_task(
             _run_avatar_image_generation(
@@ -2764,7 +2773,7 @@ async def suggest_voice_description(
     logger.info("🎙 [Voice Suggestion] Requesting AI-suggested voice description for Persona %s (Hint: '%s')...", payload.persona_id, payload.user_hint)
     try:
         logger.info("🎙 [Voice Suggestion] Downloading persona portrait bytes: %s...", image_url)
-        image_bytes = await _fetch_url_bytes(image_url)
+        image_bytes = await _fetch_url_bytes(image_url, ctx)
         logger.info("🎙 [Voice Suggestion] Requesting voice analysis suggestion from vision LLM (%s)...", settings.gender_provider)
         description = await ai_router.describe_voice(
             image_bytes, user_prompt=payload.user_hint
@@ -3048,7 +3057,7 @@ async def retry_voice(
                 detail="Original sample is not stored — please re-upload.",
             )
         logger.info("🎙 [Voice %s] Fetching original sample bytes to retry clone...", voice_id)
-        audio_bytes = await _fetch_url_bytes(row.sample_url)
+        audio_bytes = await _fetch_url_bytes(row.sample_url, ctx)
         sample_ext = os.path.splitext(row.sample_url.split("?", 1)[0])[1].lower() or ".mp3"
         await repo.update_voice(
             ctx.session, voice_id, status="processing", last_error=None
